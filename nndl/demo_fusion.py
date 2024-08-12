@@ -10,6 +10,7 @@ from rf.model import RF_conv_decoder
 from rgb.model import CNN3D
 from data.datasets import RFDataRAMVersion, RGBData
 import matplotlib.pyplot as plt
+from utils.utils import extract_video, pulse_rate_from_power_spectral_density
 
 # def parseArgs():
 #     parser = argparse.ArgumentParser(description='Configs for running demo fusion script')
@@ -85,28 +86,82 @@ def load_rf_data(folds_path, rf_dir):
 
 def preprocess_rgb(frames, model, device, sequence_length=64):
     """Process RGB frames to estimate rPPG using the RGB model."""
-    estimated_ppg = []
-    for i in range(0, len(frames) - sequence_length, sequence_length):
-        batch = frames[i:i + sequence_length]
-        batch = torch.tensor(batch).float().permute(0, 3, 1, 2) / 255.0  # Normalize and change dims
-        batch = batch.unsqueeze(0).to(device)  # Add batch dimension
-        with torch.no_grad():
-            ppg_est, _, _, _ = model(batch)
-            estimated_ppg.append(ppg_est.squeeze().cpu().numpy())
-    estimated_ppg = np.concatenate(estimated_ppg, axis=0)
+    model.eval()
+    estimated_ppg = None
+    cur_cat_frames = None
+    
+    #Check if this logic works.
+    #also verify if the loaded rgb dataset is a set of frames as expected.
+    #For this to work on multiple videos; need to include the 'for cur_session in session_names' as seen in eval.py
+
+    for cur_frame_num in range(len(frames)):
+        cur_frame = frames[cur_frame_num]
+        print(f"Current frame has shape {cur_frame.shape}")
+        print(f"Length of frames is: {len(frames)}")
+        cur_frame = torch.from_numpy(cur_frame.astype(np.uint8)).permute(2, 0, 1).float() / 255.0 #reshapes hxwxc to cxhxw
+        cur_frame = cur_frame.unsqueeze(0).to(device) #becomes 1xcxhxw
+        
+        if cur_frame_num % sequence_length == 0:
+            cur_cat_frames = cur_frame
+        else:
+            cur_cat_frames = torch.cat((cur_cat_frames, cur_frame), 0)
+        
+        if cur_cat_frames.shape[0] == sequence_length:
+            cur_cat_frames = cur_cat_frames.unsqueeze(0)
+            cur_cat_frames = torch.transpose(cur_cat_frames, 1, 2)
+            
+            with torch.no_grad():
+                cur_est_ppg, _, _, _ = model(cur_cat_frames)
+                cur_est_ppg = cur_est_ppg.squeeze().cpu().numpy()
+                
+                if estimated_ppg is None:
+                    estimated_ppg = cur_est_ppg
+                else:
+                    estimated_ppg = np.concatenate((estimated_ppg, cur_est_ppg), -1)
+                    
     return estimated_ppg
+    #remember to write in eval code from the latter half of eval.eval_rgb_model.
+    #for now this is purely an eval script.
 
 def preprocess_rf(rf_signal, model, device, sequence_length=128, sampling_ratio=4):
     """Process RF signal to estimate rPPG using the RF model."""
-    estimated_ppg = []
-    for i in range(0, rf_signal.shape[-1] - sequence_length * sampling_ratio, sequence_length * sampling_ratio):
-        batch = rf_signal[:, :, i:i + sequence_length * sampling_ratio]
-        batch = torch.tensor(batch).float().to(device)
-        with torch.no_grad():
-            ppg_est, _ = model(batch)
-            estimated_ppg.append(ppg_est.squeeze().cpu().numpy())
-    estimated_ppg = np.concatenate(estimated_ppg, axis=0)
+    model.eval()
+    estimated_ppg = None
+    cur_cat_frames = None
+
+    for cur_frame_num in range(rf_signal.shape[-1]):
+        cur_frame = rf_signal[:, :, cur_frame_num]
+        cur_frame = torch.tensor(cur_frame).float().to(device)
+        
+        if cur_frame_num % (sequence_length * sampling_ratio) == 0:
+            cur_cat_frames = cur_frame.unsqueeze(0)
+        else:
+            cur_cat_frames = torch.cat((cur_cat_frames, cur_frame.unsqueeze(0)), 0)
+        
+        if cur_cat_frames.shape[0] == sequence_length * sampling_ratio:
+            cur_cat_frames = cur_cat_frames.unsqueeze(0)
+            cur_cat_frames = torch.transpose(cur_cat_frames, 1, 2)
+            cur_cat_frames = torch.transpose(cur_cat_frames, 2, 3)
+            IQ_frames = torch.reshape(cur_cat_frames, (cur_cat_frames.shape[0], -1, cur_cat_frames.shape[3]))
+            
+            with torch.no_grad():
+                cur_est_ppg, _ = model(IQ_frames)
+                cur_est_ppg = cur_est_ppg.squeeze().cpu().numpy()
+                
+                if estimated_ppg is None:
+                    estimated_ppg = cur_est_ppg
+                else:
+                    estimated_ppg = np.concatenate((estimated_ppg, cur_est_ppg), -1)
+                    
     return estimated_ppg
+
+def calculate_hr(ppg_signal, fs=30):
+    """Calculate Heart Rate (HR) from the PPG signal using its FFT."""
+    return pulse_rate_from_power_spectral_density(ppg_signal, FS=fs, LL_PR=45, UL_PR=180, BUTTER_ORDER=6)
+
+def calculate_rr(ppg_signal, fs=30):
+    """Calculate Respiratory Rate (RR) from the PPG signal using its FFT."""
+    return pulse_rate_from_power_spectral_density(ppg_signal, FS=fs, LL_PR=5, UL_PR=50, BUTTER_ORDER=6)
 
 def apply_fft(ppg_signal, fft_resolution=1):
     """Apply FFT to a PPG signal."""
@@ -116,7 +171,6 @@ def apply_fft(ppg_signal, fft_resolution=1):
 
 def run_inference(folds_path, rgb_dir, rf_dir, rgb_model, rf_model, fusion_model, device):
     """Run inference on RGB and RF data to predict rPPG, HR, and RR."""
-    
     # Load datasets using the classes
     rf_dataset = load_rf_data(folds_path, rf_dir)
     rgb_dataset = load_rgb_data(folds_path, rgb_dir)
@@ -202,9 +256,35 @@ def main():
     # Output results
     print(f"Predicted HR: {hr} bpm")
     print(f"Predicted RR: {rr} bpm")
-    print(f"Ground Truth PPG (RGB): {rgb_gt_ppg}")
-    print(f"Ground Truth PPG (RF): {rf_gt_ppg}")
-    #plot the predicted rppg; that is currently unused
+    # Plotting the results
+    plt.figure(figsize=(12, 6))
+
+    # Plot predicted PPG
+    plt.subplot(3, 1, 1)
+    plt.plot(predicted_rppg, label='Predicted PPG')
+    plt.title('Predicted PPG Signal')
+    plt.xlabel('Time')
+    plt.ylabel('Amplitude')
+    plt.legend()
+
+    # Plot ground truth RGB PPG
+    plt.subplot(3, 1, 2)
+    plt.plot(rgb_gt_ppg, label='Ground Truth RGB PPG', color='g')
+    plt.title('Ground Truth RGB PPG Signal')
+    plt.xlabel('Time')
+    plt.ylabel('Amplitude')
+    plt.legend()
+
+    # Plot ground truth RF PPG
+    plt.subplot(3, 1, 3)
+    plt.plot(rf_gt_ppg, label='Ground Truth RF PPG', color='r')
+    plt.title('Ground Truth RF PPG Signal')
+    plt.xlabel('Time')
+    plt.ylabel('Amplitude')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
 
 if __name__ == '__main__':
     main()
