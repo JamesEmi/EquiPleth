@@ -2,6 +2,8 @@ import os
 import numpy as np
 import torch
 import pickle
+import argparse
+
 from scipy.fftpack import fft, ifft
 from fusion.model import FusionModel
 from rf.model import RF_conv_decoder
@@ -9,24 +11,76 @@ from rgb.model import CNN3D
 from data.datasets import RFDataRAMVersion, RGBData
 import matplotlib.pyplot as plt
 
-def load_rgb_data(rgb_dir):
-    """Load RGB frames and corresponding ground truth PPG using the RGBData class."""
-    rgb_dataset = RGBData(datapath=rgb_dir, datapaths=os.listdir(rgb_dir))
-    print(f"Loading RGB data from {rgb_dir}")
-    print(f"Files found: {os.listdir(rgb_dir)}")
+# def parseArgs():
+#     parser = argparse.ArgumentParser(description='Configs for running demo fusion script')
+
+#     parser.add_argument('--folds-path', type=str,
+#                         default="/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/demo_fold.pkl",
+#                         help='Pickle file containing the folds.')
+                        
+#     parser.add_argument('--fold', type=int, default=0,
+#                         help='Fold Number')
     
-    if len(rgb_dataset.video_list) == 0:
-        raise ValueError(f"No valid RGB data found in directory: {rgb_dir}")
+#     parser.add_argument('--rgb-dir', type=str,
+#                         default="/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rgb_files/v_1_1",
+#                         help="Directory containing the RGB files")
+    
+#     parser.add_argument('--rf-dir', type=str,
+#                         default="/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rf_files/1_1",
+#                         help="Directory containing the RF files")
+    
+#     parser.add_argument('--device', type=str, default=None,
+#                         help="Device to run the model on. If not specified, defaults to available device.")
+
+#     parser.add_argument('--rgb-checkpoint-path', type=str,
+#                         default="/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/best_pth/RGB_CNN3D/best.pth",
+#                         help="Path to the RGB model checkpoint.")
+    
+#     parser.add_argument('--rf-checkpoint-path', type=str,
+#                         default="/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/best_pth/RF_IQ_Net/best.pth",
+#                         help="Path to the RF model checkpoint.")
+    
+#     parser.add_argument('--fusion-checkpoint-path', type=str,
+#                         default="/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/best_pth/Fusion/Gen_9_epochs.pth",
+#                         help="Path to the fusion model checkpoint.")
+
+#     return parser.parse_args()
+
+
+def load_rgb_data(folds_path, rgb_dir):
+    """Load RGB frames and corresponding ground truth PPG using the RGBData class."""
+    
+    with open(folds_path, "rb") as fp:
+        files_in_fold = pickle.load(fp)
+
+    demo_files = files_in_fold[0]["test"][:1]
+
+    rgb_dataset = RGBData(datapath=rgb_dir, datapaths=demo_files)
+    print(f"Loading RGB data from {rgb_dir}")
+    # print(f"Files found: {os.listdir(rgb_dir)}")
+    
+    # if len(rgb_dataset.video_list) == 0:
+    #     raise ValueError(f"No valid RGB data found in directory: {rgb_dir}")
     return rgb_dataset
 
-def load_rf_data(rf_dir):
+def load_rf_data(folds_path, rf_dir):
     """Load RF data and corresponding ground truth PPG using the RFDataRAMVersion class."""
-    rf_dataset = RFDataRAMVersion(datapath=rf_dir, datapaths=os.listdir(rf_dir))
+
+    with open(folds_path, "rb") as fp:
+        files_in_fold = pickle.load(fp)
+
+    demo_files = files_in_fold[0]["test"][:1]
+    demo_files = [i[2:] for i in demo_files]
+    print(demo_files)
+
+    rf_dataset = RFDataRAMVersion(datapath=rf_dir, datapaths=demo_files, frame_length_ppg = 128, 
+                                    static_dataset_samples=15)
+
     print(f"Loading RF data from {rf_dir}")
-    print(f"Files found: {os.listdir(rf_dir)}")
+    # print(f"Files found: {os.listdir(rf_dir)}")
     
-    if len(rf_dataset.rf_file_list) == 0:
-        raise ValueError(f"No valid RF data found in directory: {rf_dir}")
+    # if len(rf_dataset.rf_file_list) == 0:
+    #     raise ValueError(f"No valid RF data found in directory: {rf_dir}")
     return rf_dataset
 
 def preprocess_rgb(frames, model, device, sequence_length=64):
@@ -60,43 +114,47 @@ def apply_fft(ppg_signal, fft_resolution=1):
     fft_signal = np.abs(fft(ppg_signal, n=int(n_curr), axis=0))
     return fft_signal
 
-def run_inference(rgb_dir, rf_dir, rgb_model, rf_model, fusion_model, device):
+def run_inference(folds_path, rgb_dir, rf_dir, rgb_model, rf_model, fusion_model, device):
     """Run inference on RGB and RF data to predict rPPG, HR, and RR."""
-    # Load datasets using the classes
-    rf_dataset = load_rf_data(rf_dir)
-    # rgb_dataset = load_rgb_data(rgb_dir)
     
+    # Load datasets using the classes
+    rf_dataset = load_rf_data(folds_path, rf_dir)
+    rgb_dataset = load_rgb_data(folds_path, rgb_dir)
+    
+    print(f"RGB Dataset: {rgb_dataset}")
+    print(f"RF Dataset: {rf_dataset}")
+
     # Preprocess and predict RGB and RF PPG signals
-    # estimated_rgb_ppg = preprocess_rgb([data[0] for data in rgb_dataset], rgb_model, device)
+    estimated_rgb_ppg = preprocess_rgb([data[0] for data in rgb_dataset], rgb_model, device)
     estimated_rf_ppg = preprocess_rf([data[0] for data in rf_dataset], rf_model, device)
     
     # Apply FFT
-    # rgb_fft = apply_fft(estimated_rgb_ppg)
+    rgb_fft = apply_fft(estimated_rgb_ppg)
     rf_fft = apply_fft(estimated_rf_ppg)
     
     # Convert to torch tensors
-    # rgb_fft_tensor = torch.tensor(rgb_fft, dtype=torch.float32).unsqueeze(0).to(device)
+    rgb_fft_tensor = torch.tensor(rgb_fft, dtype=torch.float32).unsqueeze(0).to(device)
     rf_fft_tensor = torch.tensor(rf_fft, dtype=torch.float32).unsqueeze(0).to(device)
     
     # Model inference
-    # fusion_model.eval()
-    # with torch.no_grad():
-    #     predicted_fft = fusion_model(rgb_fft_tensor, rf_fft_tensor)
+    fusion_model.eval()
+    with torch.no_grad():
+        predicted_fft = fusion_model(rgb_fft_tensor, rf_fft_tensor)
     
     # Post-process: Reconstruct rPPG signal using IFFT
-    # predicted_fft = predicted_fft.squeeze().cpu().numpy()
-    # predicted_rppg = np.real(ifft(predicted_fft))
+    predicted_fft = predicted_fft.squeeze().cpu().numpy()
+    predicted_rppg = np.real(ifft(predicted_fft))
     
     # Calculate HR and RR from the predicted rPPG signal
-    # hr = calculate_hr(predicted_rppg)
-    # rr = calculate_rr(predicted_rppg)
+    hr = calculate_hr(predicted_rppg)
+    rr = calculate_rr(predicted_rppg)
     
     # For comparison, normalize the ground truth PPG signal
-    # normalized_rgb_gt_ppg = (rgb_dataset.signal_list.flatten() - np.mean(rgb_dataset.signal_list)) / np.std(rgb_dataset.signal_list)
+    normalized_rgb_gt_ppg = (rgb_dataset.signal_list.flatten() - np.mean(rgb_dataset.signal_list)) / np.std(rgb_dataset.signal_list)
     normalized_rf_gt_ppg = (rf_dataset.signal_list.flatten() - np.mean(rf_dataset.signal_list)) / np.std(rf_dataset.signal_list)
     
-    # return predicted_rppg, hr, rr, normalized_rgb_gt_ppg, normalized_rf_gt_ppg
-    return normalized_rf_gt_ppg #debug version
+    return predicted_rppg, hr, rr, normalized_rgb_gt_ppg, normalized_rf_gt_ppg
+    # return normalized_rf_gt_ppg #debug version
 
 def calculate_hr(ppg_signal, fs=30):
     """Calculate Heart Rate (HR) from the PPG signal using its FFT."""
@@ -114,13 +172,15 @@ def calculate_rr(ppg_signal, fs=30):
 
 def main():
     # Arguments
-    
-    rgb_dir = "/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rgb_files/v_1_1"  # Example path to RGB data
-    rf_dir = "/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rf_files/1_1"    # Example path to RF data
+    rgb_dir = "/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rgb_files"  # Example path to RGB data
+    rf_dir = "/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rf_files"    # Example path to RF data
     rgb_checkpoint_path = "/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/best_pth/RGB_CNN3D/best.pth"  # Example checkpoint for RGB model
     rf_checkpoint_path = "/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/best_pth/RF_IQ_Net/best.pth"   # Example checkpoint for RF model
     fusion_checkpoint_path = "/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/best_pth/Fusion/Gen_9_epochs.pth"  # Example checkpoint for Fusion model
-    
+    folds_path = "/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/demo_fold.pkl"
+
+    # destination_folder = "/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rgb_files"
+
     # Device setup
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -136,14 +196,15 @@ def main():
     fusion_model.to(device)
     
     # Run inference
-    # predicted_rppg, hr, rr, rgb_gt_ppg, rf_gt_ppg = run_inference(rgb_dir, rf_dir, rgb_model, rf_model, fusion_model, device)
-    rf_gt_ppg = run_inference(rgb_dir, rf_dir, rgb_model, rf_model, fusion_model, device) #debug version
+    predicted_rppg, hr, rr, rgb_gt_ppg, rf_gt_ppg = run_inference(folds_path, rgb_dir, rf_dir, rgb_model, rf_model, fusion_model, device)
+    # rf_gt_ppg = run_inference(rgb_dir, rf_dir, rgb_model, rf_model, fusion_model, device) #debug version
     
     # Output results
-    # print(f"Predicted HR: {hr} bpm")
-    # print(f"Predicted RR: {rr} bpm")
-    # print(f"Ground Truth PPG (RGB): {rgb_gt_ppg}")
+    print(f"Predicted HR: {hr} bpm")
+    print(f"Predicted RR: {rr} bpm")
+    print(f"Ground Truth PPG (RGB): {rgb_gt_ppg}")
     print(f"Ground Truth PPG (RF): {rf_gt_ppg}")
+    #plot the predicted rppg; that is currently unused
 
 if __name__ == '__main__':
     main()
