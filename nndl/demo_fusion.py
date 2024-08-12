@@ -142,8 +142,9 @@ def preprocess_rf(rf_dir, model, device, sequence_length=128, sampling_ratio=4):
     estimated_ppg = None
     cur_cat_frames = None
 
-    print(f'rf_dir is {rf_dir}')
-    rf_fptr = open(os.path.join(rf_dir, "rf.pkl"), 'rb')
+    rf_dir_i = '/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rf_files/91_1'
+    print(f'rf_dir_i is {rf_dir_i}')
+    rf_fptr = open(os.path.join(rf_dir_i, "rf.pkl"), 'rb')
     s = pickle.load(rf_fptr)
     adc_samples = 256
     freq_slope = 60.012e12
@@ -216,8 +217,8 @@ def run_inference(folds_path, rgb_dir, rf_dir, rgb_model, rf_model, fusion_model
     print(f"RF Dataset: {rf_dataset}")
 
     # Preprocess and predict RGB and RF PPG signals
-    # estimated_rgb_ppg = preprocess_rgb([data[0] for data in rgb_dataset], rgb_model, device)
-    estimated_rf_ppg = preprocess_rf([data[0] for data in rf_dataset], rf_model, device)
+    estimated_rgb_ppg = preprocess_rgb([data[0] for data in rgb_dataset], rgb_model, device)
+    estimated_rf_ppg = preprocess_rf(rf_dir, rf_model, device)
     
     # Apply FFT
     rgb_fft = apply_fft(estimated_rgb_ppg)
@@ -225,7 +226,9 @@ def run_inference(folds_path, rgb_dir, rf_dir, rgb_model, rf_model, fusion_model
     
     # Convert to torch tensors
     rgb_fft_tensor = torch.tensor(rgb_fft, dtype=torch.float32).unsqueeze(0).to(device)
+    print(f"Shape of rgb_fft_tensor is: {rgb_fft_tensor.shape}")
     rf_fft_tensor = torch.tensor(rf_fft, dtype=torch.float32).unsqueeze(0).to(device)
+    print(f"Shape of rf_fft_tensor is: {rf_fft_tensor.shape}")
     
     # Model inference
     fusion_model.eval()
