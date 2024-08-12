@@ -103,14 +103,14 @@ def preprocess_rgb(frames, model, device, sequence_length=64):
         print(f'Processing batch number {batch}')
         frames_i = frames[batch]
         #frames_i = np.array(frames_i)
-        print(f'shape of frames_i here is: {frames_i.shape}')
+        # print(f'shape of frames_i here is: {frames_i.shape}')
         frames_i = np.transpose(frames_i, (1, 2, 3, 0)) #reshaping from [3, 64, 128, 128] to [64, 128, 128, 3]
-        print(f'shape of frames_i is now: {frames_i.shape}')
+        # print(f'shape of frames_i is now: {frames_i.shape}')
 
         for cur_frame_num in range(frames_i.shape[0]):
             cur_frame = frames_i[cur_frame_num, :, :, :]
-            print(f"Current frame has shape {cur_frame.shape}")
-            print(f"Length of frames is: {len(frames)}")
+            # print(f"Current frame has shape {cur_frame.shape}") #commenting out; this worked
+            # print(f"Length of frames is: {len(frames)}")
             cur_frame = torch.from_numpy(cur_frame.astype(np.uint8)).permute(2, 0, 1).float() / 255.0 #reshapes hxwxc to cxhxw
             cur_frame = cur_frame.unsqueeze(0).to(device) #becomes 1xcxhxw
             
@@ -142,11 +142,33 @@ def preprocess_rf(rf_dir, model, device, sequence_length=128, sampling_ratio=4):
     estimated_ppg = None
     cur_cat_frames = None
 
-    print(f'length of rf_signal is: {len(rf_signal)}')
-    print(f'length of rf_signal is: {len(rf_signal)}')
-    for cur_frame_num in range(rf_signal.shape[-1]):
-        cur_frame = rf_signal[:, :, cur_frame_num]
-        cur_frame = torch.tensor(cur_frame).float().to(device)
+    print(f'rf_dir is {rf_dir}')
+    rf_fptr = open(os.path.join(rf_dir, "rf.pkl"), 'rb')
+    s = pickle.load(rf_fptr)
+    adc_samples = 256
+    freq_slope = 60.012e12
+    samp_f = 5e6
+    rf_window_size = 5
+
+    rf_organizer = Organizer(s, 1, 1, 1, 2 * adc_samples)
+    frames = rf_organizer.organize()
+    frames = frames[:,:,:,0::2]  # Remove alternate zeros
+
+    data_f = create_fast_slow_matrix(frames)
+    range_index = find_range(data_f, samp_f, freq_slope, adc_samples)
+    temp_window = np.blackman(rf_window_size)
+    raw_data = data_f[:, range_index - len(temp_window) // 2 : range_index + len(temp_window) // 2 + 1]
+    circ_buffer = raw_data[0:800]
+    raw_data = np.concatenate((raw_data, circ_buffer))
+    raw_data = np.array([np.real(raw_data), np.imag(raw_data)])
+    raw_data = np.transpose(raw_data, axes=(0, 2, 1))
+    rf_data = raw_data
+    rf_data = np.transpose(rf_data, axes=(2, 0, 1))
+    print(f'Shape of rf_data here is: {rf_data.shape}')
+
+    for cur_frame_num in range(rf_data.shape[0]):
+        cur_frame = rf_data[cur_frame_num, :, :]
+        cur_frame = torch.tensor(cur_frame).float().to(device) / 1.255e5
         
         if cur_frame_num % (sequence_length * sampling_ratio) == 0:
             cur_cat_frames = cur_frame.unsqueeze(0)
@@ -194,7 +216,7 @@ def run_inference(folds_path, rgb_dir, rf_dir, rgb_model, rf_model, fusion_model
     print(f"RF Dataset: {rf_dataset}")
 
     # Preprocess and predict RGB and RF PPG signals
-    estimated_rgb_ppg = preprocess_rgb([data[0] for data in rgb_dataset], rgb_model, device)
+    # estimated_rgb_ppg = preprocess_rgb([data[0] for data in rgb_dataset], rgb_model, device)
     estimated_rf_ppg = preprocess_rf([data[0] for data in rf_dataset], rf_model, device)
     
     # Apply FFT
