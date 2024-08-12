@@ -4,14 +4,16 @@ import torch
 import pickle
 import argparse
 
+import matplotlib.pyplot as plt
 from scipy.fftpack import fft, ifft
 from fusion.model import FusionModel
 from rf.model import RF_conv_decoder
 from rgb.model import CNN3D
 from data.datasets import RFDataRAMVersion, RGBData
-import matplotlib.pyplot as plt
-from utils.utils import extract_video, pulse_rate_from_power_spectral_density
 
+from utils.utils import extract_video, pulse_rate_from_power_spectral_density
+from rf.organizer import Organizer
+from rf.proc import create_fast_slow_matrix, find_range
 # def parseArgs():
 #     parser = argparse.ArgumentParser(description='Configs for running demo fusion script')
 
@@ -94,41 +96,54 @@ def preprocess_rgb(frames, model, device, sequence_length=64):
     #also verify if the loaded rgb dataset is a set of frames as expected.
     #For this to work on multiple videos; need to include the 'for cur_session in session_names' as seen in eval.py
 
-    for cur_frame_num in range(len(frames)):
-        cur_frame = frames[cur_frame_num]
-        print(f"Current frame has shape {cur_frame.shape}")
-        print(f"Length of frames is: {len(frames)}")
-        cur_frame = torch.from_numpy(cur_frame.astype(np.uint8)).permute(2, 0, 1).float() / 255.0 #reshapes hxwxc to cxhxw
-        cur_frame = cur_frame.unsqueeze(0).to(device) #becomes 1xcxhxw
-        
-        if cur_frame_num % sequence_length == 0:
-            cur_cat_frames = cur_frame
-        else:
-            cur_cat_frames = torch.cat((cur_cat_frames, cur_frame), 0)
-        
-        if cur_cat_frames.shape[0] == sequence_length:
-            cur_cat_frames = cur_cat_frames.unsqueeze(0)
-            cur_cat_frames = torch.transpose(cur_cat_frames, 1, 2)
+    n_batches = len(frames)
+    print(f'num_batches: {n_batches}')
+
+    for batch in range(n_batches): #should prolly be n_batches-1
+        print(f'Processing batch number {batch}')
+        frames_i = frames[batch]
+        #frames_i = np.array(frames_i)
+        print(f'shape of frames_i here is: {frames_i.shape}')
+        frames_i = np.transpose(frames_i, (1, 2, 3, 0)) #reshaping from [3, 64, 128, 128] to [64, 128, 128, 3]
+        print(f'shape of frames_i is now: {frames_i.shape}')
+
+        for cur_frame_num in range(frames_i.shape[0]):
+            cur_frame = frames_i[cur_frame_num, :, :, :]
+            print(f"Current frame has shape {cur_frame.shape}")
+            print(f"Length of frames is: {len(frames)}")
+            cur_frame = torch.from_numpy(cur_frame.astype(np.uint8)).permute(2, 0, 1).float() / 255.0 #reshapes hxwxc to cxhxw
+            cur_frame = cur_frame.unsqueeze(0).to(device) #becomes 1xcxhxw
             
-            with torch.no_grad():
-                cur_est_ppg, _, _, _ = model(cur_cat_frames)
-                cur_est_ppg = cur_est_ppg.squeeze().cpu().numpy()
+            if cur_frame_num % sequence_length == 0:
+                cur_cat_frames = cur_frame
+            else:
+                cur_cat_frames = torch.cat((cur_cat_frames, cur_frame), 0)
+            
+            if cur_cat_frames.shape[0] == sequence_length:
+                cur_cat_frames = cur_cat_frames.unsqueeze(0)
+                cur_cat_frames = torch.transpose(cur_cat_frames, 1, 2)
                 
-                if estimated_ppg is None:
-                    estimated_ppg = cur_est_ppg
-                else:
-                    estimated_ppg = np.concatenate((estimated_ppg, cur_est_ppg), -1)
+                with torch.no_grad():
+                    cur_est_ppg, _, _, _ = model(cur_cat_frames)
+                    cur_est_ppg = cur_est_ppg.squeeze().cpu().numpy()
                     
+                    if estimated_ppg is None:
+                        estimated_ppg = cur_est_ppg
+                    else:
+                        estimated_ppg = np.concatenate((estimated_ppg, cur_est_ppg), -1)
+                        
     return estimated_ppg
     #remember to write in eval code from the latter half of eval.eval_rgb_model.
     #for now this is purely an eval script.
 
-def preprocess_rf(rf_signal, model, device, sequence_length=128, sampling_ratio=4):
+def preprocess_rf(rf_dir, model, device, sequence_length=128, sampling_ratio=4):
     """Process RF signal to estimate rPPG using the RF model."""
     model.eval()
     estimated_ppg = None
     cur_cat_frames = None
 
+    print(f'length of rf_signal is: {len(rf_signal)}')
+    print(f'length of rf_signal is: {len(rf_signal)}')
     for cur_frame_num in range(rf_signal.shape[-1]):
         cur_frame = rf_signal[:, :, cur_frame_num]
         cur_frame = torch.tensor(cur_frame).float().to(device)
