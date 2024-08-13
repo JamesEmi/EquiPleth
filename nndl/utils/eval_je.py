@@ -314,11 +314,16 @@ def eval_fusion_model(dataset_test, model, device = torch.device('cpu'), method 
     model.eval()
     print(f"Method : {method}")
     mae_list = []
+    mae_list_rr = []
     session_names = []
     hr_est_arr = []
     hr_gt_arr = []
     hr_rgb_arr = []
     hr_rf_arr = []
+    rr_est_arr = [] #
+    rr_gt_arr = []
+    rr_rgb_arr = []
+    rr_rf_arr = [] #
     est_wv_arr = []
     gt_wv_arr = []
     rgb_wv_arr = []
@@ -330,6 +335,12 @@ def eval_fusion_model(dataset_test, model, device = torch.device('cpu'), method 
         targ_ffts = []
         pred_rgbs = []
         pred_rfs  = []
+
+        pred_ffts_rr = []
+        targ_ffts_rr = []
+        pred_rgbs_rr = []
+        pred_rfs_rr  = []
+
         train_sig, gt_sig = dataset_test[i]
         print(f"Sample {i+1}/{len(dataset_test)}")
         print(f"train_sig keys: {train_sig.keys()}")
@@ -390,24 +401,41 @@ def eval_fusion_model(dataset_test, model, device = torch.device('cpu'), method 
         rppg_est = (rppg_est - np.mean(rppg_est)) / np.std(rppg_est)
         gt_est = (gt_est - np.mean(gt_est)) / np.std(gt_est)
 
-        pred_ffts.append(pulse_rate_from_power_spectral_density(rppg_est, 30, 45, 150))
-        targ_ffts.append(pulse_rate_from_power_spectral_density(gt_est, 30, 45, 150))
-        pred_rgbs.append(pulse_rate_from_power_spectral_density(train_sig['rgb_true'], 30, 45, 150))
-        pred_rfs.append(pulse_rate_from_power_spectral_density(train_sig['rf_true'], 30, 45, 150))
+        pred_ffts.append(pulse_rate_from_power_spectral_density(rppg_est, 30, 45, 150)) #fusion model HR prediction
+        targ_ffts.append(pulse_rate_from_power_spectral_density(gt_est, 30, 45, 150)) # GT HR
+        pred_rgbs.append(pulse_rate_from_power_spectral_density(train_sig['rgb_true'], 30, 45, 150)) #RGB model HR prediction
+        pred_rfs.append(pulse_rate_from_power_spectral_density(train_sig['rf_true'], 30, 45, 150)) #RF model HR prediction
+
+        pred_ffts_rr.append(pulse_rate_from_power_spectral_density(rppg_est, 30, 4, 40)) #fusion model RR prediction
+        targ_ffts_rr.append(pulse_rate_from_power_spectral_density(gt_est, 30, 4, 40)) # GT RR
+        pred_rgbs_rr.append(pulse_rate_from_power_spectral_density(train_sig['rgb_true'], 30, 4, 40)) #RGB model RR prediction
+        pred_rfs_rr.append(pulse_rate_from_power_spectral_density(train_sig['rf_true'], 30, 4, 40)) #RF model RR prediction
 
         pred_ffts = np.array(pred_ffts)[:,np.newaxis]
         targ_ffts = np.array(targ_ffts)[:,np.newaxis]
         pred_rgbs = np.array(pred_rgbs)[:,np.newaxis]
         pred_rfs = np.array(pred_rfs)[:,np.newaxis]
 
+        pred_ffts_rr = np.array(pred_ffts_rr)[:,np.newaxis]
+        targ_ffts_rr = np.array(targ_ffts_rr)[:,np.newaxis]
+        pred_rgbs_rr = np.array(pred_rgbs_rr)[:,np.newaxis]
+        pred_rfs_rr = np.array(pred_rfs_rr)[:,np.newaxis]
+
         hr_est_arr.append(pred_ffts)
-        hr_gt_arr.append(targ_ffts)
-        hr_rgb_arr.append(pred_rgbs)
-        hr_rf_arr.append(pred_rfs)
+        hr_gt_arr.append(targ_ffts) 
+        hr_rgb_arr.append(pred_rgbs) # array of RGB model HR predictions
+        hr_rf_arr.append(pred_rfs) # array of RF model HR predictions
+
+        rr_est_arr.append(pred_ffts_rr)
+        rr_gt_arr.append(targ_ffts_rr)
+        rr_rgb_arr.append(pred_rgbs_rr) # array of RGB model HR predictions
+        rr_rf_arr.append(pred_rfs_rr) # array of RF model HR predictions
 
         _, MAE, _, _ = getErrors(pred_ffts, targ_ffts, PCC=False)
+        _, MAE_rr, _, _ = getErrors(pred_ffts_rr, targ_ffts_rr, PCC=False) #adding this for RR MAE
 
         mae_list.append(MAE)
+        mae_list_rr.append(MAE_rr)
         est_wv_arr.append(rppg_est)
         gt_wv_arr.append(gt_est)
         rgb_wv_arr.append(train_sig['rgb_true'])
