@@ -25,7 +25,7 @@ def gen_single_sample_pickle(rgb_dir, rf_dir, rgb_model, rf_model, save_path, de
     print(f'Processing RGB sample from {cur_video_path}')
     
     frames = extract_video(path=cur_video_path, file_str="rgbd_rgb")
-    circ_buff = frames[0:100]
+    circ_buff = frames[0:100] #play with this param, how much to keep this to to get the 1, 1081 signal as in original model??
     frames = np.concatenate((frames, circ_buff))
     estimated_rgb_ppgs = None
 
@@ -139,6 +139,12 @@ class SingleSampleFusionDataset(Dataset):
         self.rgb_ppg = self.sample_data['est_ppgs'][self.ppg_offset:]
         self.rf_ppg = self.sample_data['rf_ppg'][self.ppg_offset:]
         self.gt_ppg = self.sample_data['gt_ppgs'][self.ppg_offset:]
+
+        # Calculate the frequency indices for the FFT
+        seq_len = len(self.rgb_ppg) * self.fft_resolution
+        freqs_bpm = np.fft.fftfreq(seq_len, d=1/self.fs) * 60
+        self.l_freq_idx = np.argmin(np.abs(freqs_bpm - self.l_freq_bpm))
+        self.u_freq_idx = np.argmin(np.abs(freqs_bpm - self.u_freq_bpm))
         
     def __len__(self):
         return 1
@@ -168,6 +174,7 @@ class SingleSampleFusionDataset(Dataset):
         else:
             return item, np.array(item_sig)
 
+
 # Step 3: Modify the main demo_fusion script to use the above methods
 
 def run_inference(folds_path, rgb_dir, rf_dir, rgb_model, rf_model, fusion_model, device):
@@ -191,15 +198,15 @@ def run_inference(folds_path, rgb_dir, rf_dir, rgb_model, rf_model, fusion_model
     # Model inference
     fusion_model.eval()
     with torch.no_grad():
-        predicted_fft = fusion_model(rgb_fft_tensor, rf_fft_tensor)
+        predicted_fft = fusion_model(rgb_fft_tensor.unsqueeze(0).to(device), rf_fft_tensor.unsqueeze(0).to(device))
     
     # Post-process: Reconstruct rPPG signal using IFFT
     predicted_fft = predicted_fft.squeeze().cpu().numpy()
     predicted_rppg = np.real(ifft(predicted_fft))
     
     # Calculate HR and RR from the predicted rPPG signal
-    hr = pulse_rate_from_power_spectral_density(predicted_rppg, FS=30, LL_PR=45, UL_PR=180, BUTTER_ORDER=6)
-    rr = pulse_rate_from_power_spectral_density(predicted_rppg, FS=30, LL_PR=5, UL_PR=50, BUTTER_ORDER=6)
+    hr = pulse_rate_from_power_spectral_density(predicted_rppg, FS=30, LL_PR=50, UL_PR=180, BUTTER_ORDER=6)
+    rr = pulse_rate_from_power_spectral_density(predicted_rppg, FS=30, LL_PR=5, UL_PR=40, BUTTER_ORDER=6)
     
     return predicted_rppg, hr, rr, fft_gt
 
