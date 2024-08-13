@@ -20,7 +20,8 @@ def gen_single_sample_pickle(rgb_dir, rf_dir, rgb_model, rf_model, save_path, de
     rf_model.eval()
 
     # Process the RGB data
-    rgb_sample_name = os.listdir(rgb_dir)[0] #should use the fold and pull from there but this works too, for now
+    # rgb_sample_name = os.listdir(rgb_dir)[0] #should use the fold and pull from there but this works too, for now
+    rgb_sample_name = 'v_91_1'
     cur_video_path = os.path.join(rgb_dir, rgb_sample_name)
     print(f'Processing RGB sample from {cur_video_path}')
     
@@ -53,9 +54,11 @@ def gen_single_sample_pickle(rgb_dir, rf_dir, rgb_model, rf_model, save_path, de
                 estimated_rgb_ppgs = np.concatenate((estimated_rgb_ppgs, cur_est_ppg), -1)
     
     rgb_gt_ppg = np.load(os.path.join(cur_video_path, "rgbd_ppg.npy"))[:900]
+    print(f'Shape of GT PPG waveform is {rgb_gt_ppg.shape}')
 
     # Process the RF data
-    rf_sample_name = os.listdir(rf_dir)[0]
+    # rf_sample_name = os.listdir(rf_dir)[0]
+    rf_sample_name = '91_1'
     cur_rf_path = os.path.join(rf_dir, rf_sample_name)
     print(f'Processing RF sample from {cur_rf_path}')
 
@@ -75,7 +78,7 @@ def gen_single_sample_pickle(rgb_dir, rf_dir, rgb_model, rf_model, save_path, de
     temp_window = np.blackman(rf_window_size)
     raw_data = data_f[:, range_index - len(temp_window) // 2 : range_index + len(temp_window) // 2 + 1]
     circ_buffer = raw_data[0:800]
-    raw_data = np.concatenate((raw_data, circ_buffer))
+    raw_data = np.concatenate((raw_data, circ_buffer)) #compare this point to original code to check for logic
     raw_data = np.array([np.real(raw_data), np.imag(raw_data)])
     raw_data = np.transpose(raw_data, axes=(0, 2, 1))
     rf_data = raw_data
@@ -91,7 +94,7 @@ def gen_single_sample_pickle(rgb_dir, rf_dir, rgb_model, rf_model, save_path, de
         else:
             cur_cat_frames = torch.cat((cur_cat_frames, cur_frame.unsqueeze(0)), 0)
         
-        if cur_cat_frames.shape[0] == 128 * 4:
+        if cur_cat_frames.shape[0] == 128 * 4: #why 128*4 ??
             cur_cat_frames = cur_cat_frames.unsqueeze(0)
             cur_cat_frames = torch.transpose(cur_cat_frames, 1, 2)
             cur_cat_frames = torch.transpose(cur_cat_frames, 2, 3)
@@ -102,7 +105,7 @@ def gen_single_sample_pickle(rgb_dir, rf_dir, rgb_model, rf_model, save_path, de
                 cur_est_ppg = cur_est_ppg.squeeze().cpu().numpy()
                 
                 if estimated_rf_ppgs is None:
-                    estimated_rf_ppgs = cur_est_ppg
+                    estimated_rf_ppgs = cur_est_ppg  #check the shapes of ALL these with print (same for the original case)
                 else:
                     estimated_rf_ppgs = np.concatenate((estimated_rf_ppgs, cur_est_ppg), -1)
     
@@ -115,6 +118,10 @@ def gen_single_sample_pickle(rgb_dir, rf_dir, rgb_model, rf_model, save_path, de
         'gt_ppgs': rgb_gt_ppg,
         'rf_ppg': estimated_rf_ppgs[:900]
     }]
+    # print(sample_data.keys())
+
+    #so all these models were trained on only 10 sec segmentes from a 30 secnd video - makes me think
+    #we probably def have to finetune the models more to get better accuracy (ofc, need a mcap testbed to race cphys, fusionv1 and fusionv2)
     
     with open(save_path, 'wb') as handle:
         pickle.dump(sample_data, handle)
@@ -124,7 +131,7 @@ def gen_single_sample_pickle(rgb_dir, rf_dir, rgb_model, rf_model, save_path, de
 # Step 2: Create a simplified dataset class to load the single sample for inference
 
 class SingleSampleFusionDataset(Dataset):
-    def __init__(self, pickle_path, compute_fft=True, fs=30, l_freq_bpm=45, u_freq_bpm=180, fft_resolution=1):
+    def __init__(self, pickle_path, compute_fft=True, fs=30, l_freq_bpm=45, u_freq_bpm=180, fft_resolution=48):
         self.compute_fft = compute_fft
         self.fs = fs
         self.l_freq_bpm = l_freq_bpm
@@ -154,7 +161,7 @@ class SingleSampleFusionDataset(Dataset):
         item_sig = self.gt_ppg
 
         item_sig = (item_sig - np.mean(item_sig)) / np.std(item_sig)
-        item['est_ppgs'] = (item['est_ppgs'] - np.mean(item['est_ppgs'])) / np.std(item['est_ppgs'])
+        item['est_ppgs'] = (item['est_ppgs'] - np.mean(item['est_ppgs'])) / np.std(item['est_ppgs']) #why are we normalizing??
         item['rf_ppg'] = (item['rf_ppg'] - np.mean(item['rf_ppg'])) / np.std(item['rf_ppg'])
 
         if self.compute_fft:
@@ -162,7 +169,7 @@ class SingleSampleFusionDataset(Dataset):
             fft_gt = np.abs(np.fft.fft(item_sig, n=int(n_curr), axis=0))
             fft_gt = fft_gt / np.max(fft_gt, axis=0)
             
-            fft_est = np.abs(np.fft.fft(item['est_ppgs'], n=int(n_curr), axis=0))
+            fft_est = np.abs(np.fft.fft(item['est_ppgs'], n=int(n_curr), axis=0)) #do I truly understand what is going on here?
             fft_est = fft_est / np.max(fft_est, axis=0)
             fft_est = fft_est[self.l_freq_idx : self.u_freq_idx + 1]
 
@@ -193,20 +200,43 @@ def run_inference(folds_path, rgb_dir, rf_dir, rgb_model, rf_model, fusion_model
     rgb_fft_tensor = torch.tensor(sample_data['est_ppgs'], dtype=torch.float32).unsqueeze(0).to(device)
     print(f"Shape of rgb_fft_tensor is: {rgb_fft_tensor.shape}")
     rf_fft_tensor = torch.tensor(sample_data['rf_ppg'], dtype=torch.float32).unsqueeze(0).to(device)
-    print(f"Shape of rf_fft_tensor is: {rf_fft_tensor.shape}")
+    print(f"Shape of rf_fft_tensor is now: {rf_fft_tensor.shape}")
+    rgb_fft_tensor = rgb_fft_tensor.unsqueeze(0).to(device)
+    print(f"Shape of rgb_fft_tensor is: {rgb_fft_tensor.shape}")
+    rf_fft_tensor = rf_fft_tensor.unsqueeze(0).to(device)
+    print(f"Shape of rf_fft_tensor is now: {rf_fft_tensor.shape}")
     
     # Model inference
     fusion_model.eval()
     with torch.no_grad():
-        predicted_fft = fusion_model(rgb_fft_tensor.unsqueeze(0).to(device), rf_fft_tensor.unsqueeze(0).to(device))
+        predicted_fft = fusion_model(rgb_fft_tensor, rf_fft_tensor)
     
     # Post-process: Reconstruct rPPG signal using IFFT
     predicted_fft = predicted_fft.squeeze().cpu().numpy()
     predicted_rppg = np.real(ifft(predicted_fft))
+    print(f"Shape of predicted_rppg here is: {predicted_rppg.shape}")
+    
+    # Calculate HR and RR from the predicted rPPG signal
+    hr_fusion = pulse_rate_from_power_spectral_density(predicted_rppg, FS=30, LL_PR=50, UL_PR=180, BUTTER_ORDER=6)
+    rr_fusion = pulse_rate_from_power_spectral_density(predicted_rppg, FS=30, LL_PR=5, UL_PR=40, BUTTER_ORDER=6)
+    
+    # Calculate HR and RR from the RF PPG prediction
+    hr_rf = pulse_rate_from_power_spectral_density(sample_data['rf_ppg'], FS=30, LL_PR=50, UL_PR=180, BUTTER_ORDER=6)
+    rr_rf = pulse_rate_from_power_spectral_density(sample_data['rf_ppg'], FS=30, LL_PR=5, UL_PR=40, BUTTER_ORDER=6)
+
+    # Calculate HR and RR from the RGB PPG prediction
+    hr_rgb = pulse_rate_from_power_spectral_density(sample_data['est_ppgs'], FS=30, LL_PR=50, UL_PR=180, BUTTER_ORDER=6)
+    rr_rgb = pulse_rate_from_power_spectral_density(sample_data['est_ppgs'], FS=30, LL_PR=5, UL_PR=40, BUTTER_ORDER=6)
     
     # Calculate HR and RR from the predicted rPPG signal
     hr = pulse_rate_from_power_spectral_density(predicted_rppg, FS=30, LL_PR=50, UL_PR=180, BUTTER_ORDER=6)
     rr = pulse_rate_from_power_spectral_density(predicted_rppg, FS=30, LL_PR=5, UL_PR=40, BUTTER_ORDER=6)
+
+    print(f"Shape of rf_ppg is now: {(sample_data['rf_ppg']).shape}")
+    print(f"Shape of gt_ppg is now: {(sample_data['gt_ppgs']).shape}")
+    # Calculate HR and RR from the ground truth PPG
+    hr_gt = pulse_rate_from_power_spectral_density(sample_data['gt_ppgs'], FS=30, LL_PR=50, UL_PR=180, BUTTER_ORDER=6)
+    rr_gt = pulse_rate_from_power_spectral_density(sample_data['gt_ppgs'], FS=30, LL_PR=5, UL_PR=40, BUTTER_ORDER=6)
     
     return predicted_rppg, hr, rr, fft_gt
 
@@ -233,11 +263,19 @@ def main():
     fusion_model.to(device)
     
     # Run inference
-    predicted_rppg, hr, rr, fft_gt = run_inference(None, rgb_dir, rf_dir, rgb_model, rf_model, fusion_model, device)
+    predicted_rppg, hr_fusion, rr_fusion, hr_rgb, rr_rgb, hr_rf, rr_rf, hr_gt, rr_gt, fft_gt = run_inference(None, rgb_dir, rf_dir, rgb_model, rf_model, fusion_model, device)
+    
     
     # Output results
-    print(f"Predicted HR: {hr} bpm")
-    print(f"Predicted RR: {rr} bpm")
+    # Output results
+    print(f"Predicted HR (Fusion): {hr_fusion} bpm")
+    print(f"Predicted RR (Fusion): {rr_fusion} bpm")
+    print(f"Predicted HR (RGB): {hr_rgb} bpm")
+    print(f"Predicted RR (RGB): {rr_rgb} bpm")
+    print(f"Predicted HR (RF): {hr_rf} bpm")
+    print(f"Predicted RR (RF): {rr_rf} bpm")
+    print(f"Ground Truth HR: {hr_gt} bpm")
+    print(f"Ground Truth RR: {rr_gt} bpm")
     # Plotting the results
     plt.figure(figsize=(12, 6))
 
