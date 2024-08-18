@@ -170,7 +170,7 @@ def gen_rf_preds(root_path, demo_files, model, sequence_length = 128, max_ppg_le
 
 def gen_rf_preds_chiron(root_path, demo_files, model, sequence_length = 128, max_ppg_length = 900, 
                   adc_samples = 512, rf_window_size = 5, freq_slope=60.012e12, 
-                  samp_f=218000, sampling_ratio = 4, device=torch.device('cpu')):
+                  samp_f=218000, sampling_ratio = 4, num_chirps=16, device=torch.device('cpu')):
     model.eval()
     video_samples = []
     for rf_folder in tqdm(demo_files, total=len(demo_files)):
@@ -178,9 +178,9 @@ def gen_rf_preds_chiron(root_path, demo_files, model, sequence_length = 128, max
             rf_fptr = open(os.path.join(root_path, rf_folder, "rf.pkl"),'rb')
             s = pickle.load(rf_fptr)
             
-            radar_data = np.array(s)
+            # radar_data = np.array(s) #conversion to np array before passing to org is not necessary
             # Number of samples is set ot 256 for our experiments
-            rf_organizer = org.Organizer(radar_data, 1, 1, 1, adc_samples)
+            rf_organizer = org.Organizer(s, num_chirps, 1, 1, adc_samples)
             #have to check equipleth vs chiron data deeper to see if there is interleaving (bring back 2*adc_samples??) 
             frames = rf_organizer.organize()
 
