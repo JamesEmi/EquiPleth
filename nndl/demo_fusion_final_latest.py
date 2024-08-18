@@ -168,6 +168,84 @@ def gen_rf_preds(root_path, demo_files, model, sequence_length = 128, max_ppg_le
         print('All finished!')
     return video_samples
 
+def gen_rf_preds_chiron(root_path, demo_files, model, sequence_length = 128, max_ppg_length = 900, 
+                  adc_samples = 512, rf_window_size = 5, freq_slope=60.012e12, 
+                  samp_f=218000, sampling_ratio = 4, device=torch.device('cpu')):
+    model.eval()
+    video_samples = []
+    for rf_folder in tqdm(demo_files, total=len(demo_files)):
+        try:
+            rf_fptr = open(os.path.join(root_path, rf_folder, "rf.pkl"),'rb')
+            s = pickle.load(rf_fptr)
+            
+            radar_data = np.array(s)
+            # Number of samples is set ot 256 for our experiments
+            rf_organizer = org.Organizer(radar_data, 1, 1, 1, adc_samples)
+            #have to check equipleth vs chiron data deeper to see if there is interleaving (bring back 2*adc_samples??) 
+            frames = rf_organizer.organize()
+
+            # # The RF read adds zero alternatively to the samples. Remove these zeros.
+            # frames = frames[:,:,:,0::2] #look at the chiron radar data and see if this is necessary.
+
+            data_f = create_fast_slow_matrix(frames)
+            range_index = find_range(data_f, samp_f, freq_slope, adc_samples)
+            temp_window = np.blackman(rf_window_size)
+            raw_data = data_f[:, range_index-len(temp_window)//2:range_index+len(temp_window)//2 + 1]
+            circ_buffer = raw_data[0:800]
+            
+            # Concatenate extra to generate ppgs of size 3600
+            raw_data = np.concatenate((raw_data, circ_buffer))
+            raw_data = np.array([np.real(raw_data),  np.imag(raw_data)])
+            raw_data = np.transpose(raw_data, axes=(0,2,1))
+            rf_data = raw_data
+
+            rf_data = np.transpose(rf_data, axes=(2,0,1))
+            cur_video_sample = {}
+
+            cur_est_ppgs = None
+
+            for cur_frame_num in range(rf_data.shape[0]):
+                # Preprocess
+                cur_frame = rf_data[cur_frame_num, :, :]
+                cur_frame = torch.tensor(cur_frame).type(torch.float32)/1.255e5 #might have to empirically adjust this norm value
+                # Add the T dim
+                cur_frame = cur_frame.unsqueeze(0).to(device)
+
+                # Concat
+                if cur_frame_num % (sequence_length*sampling_ratio) == 0:
+                    cur_cat_frames = cur_frame
+                else:
+                    cur_cat_frames = torch.cat((cur_cat_frames, cur_frame), 0)
+
+                # Test the performance
+                if cur_cat_frames.shape[0] == sequence_length*sampling_ratio:
+                    # DL
+                    with torch.no_grad():
+                        # Add the B dim
+                        cur_cat_frames = cur_cat_frames.unsqueeze(0)
+                        cur_cat_frames = torch.transpose(cur_cat_frames, 1, 2)
+                        cur_cat_frames = torch.transpose(cur_cat_frames, 2, 3)
+                        IQ_frames = torch.reshape(cur_cat_frames, (cur_cat_frames.shape[0], -1, cur_cat_frames.shape[3]))
+                        cur_est_ppg, _ = model(IQ_frames)
+                        cur_est_ppg = cur_est_ppg.squeeze().cpu().numpy()
+
+                    # First seq
+                    if cur_est_ppgs is None: 
+                        cur_est_ppgs = cur_est_ppg
+                    else:
+                        cur_est_ppgs = np.concatenate((cur_est_ppgs, cur_est_ppg), -1)
+        
+            # Save
+            cur_video_sample['video_path'] = rf_folder
+            cur_video_sample['rf_ppg'] = cur_est_ppgs[0:max_ppg_length]
+
+            video_samples.append(cur_video_sample)
+        except:
+            if args.verbose:
+                print("RF folder does not exist : ", rf_folder)
+    if args.verbose:
+        print('All finished!')
+    return video_samples
 
 def save_fusion_data_to_pickle(rgb_frames_dir, session_name, est_ppgs, rf_ppg, pickle_path, fs=30):
     """Save the generated PPG data and RF PPGs into a pickle file."""
@@ -210,6 +288,7 @@ def main(args):
     rf_ckpt_path = '/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/best_pth/RF_IQ_Net/best.pth'  # Update this path
     rf_model.load_state_dict(torch.load(rf_ckpt_path, map_location=args.device))
     rf_demo_data =  gen_rf_preds(root_path=args.rf_dir, demo_files=rf_demo, model=rf_model, device=args.device)
+    # rf_demo_data =  gen_rf_preds_chiron(root_path=args.rf_dir, demo_files=rf_demo, model=rf_model, device=args.device)
 
     # Load the model for generating PPG from RGB frames
     rgb_model = CNN3D().to(args.device)
