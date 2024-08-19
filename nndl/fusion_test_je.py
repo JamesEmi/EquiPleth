@@ -1,113 +1,324 @@
-from calendar import EPOCH
-import numpy as np 
-import pickle
 import os
-import argparse
-import matplotlib.pyplot as plt
-
+import pickle
+import numpy as np
+import scipy.stats
+import sklearn.metrics
 import torch
 
-from fusion.model import Discriminator, FusionModel
-from data.datasets import FusionEvalDatasetObject
-from utils.eval_je import eval_fusion_model, eval_performance_bias, eval_clinical_performance
+from tqdm import tqdm
 
-import os
-os.environ['KMP_DUPLICATE_LIB_OK']='True'
+from rf import organizer as org
+from rf.proc import create_fast_slow_matrix, find_range
+from .errors import getErrors
+from .utils import extract_video, pulse_rate_from_power_spectral_density
 
-# Argparser.
-def parseArgs():
-    parser = argparse.ArgumentParser(description='Configs for thr RF test script')
 
-    parser.add_argument('-dir', '--pickle-file-dir', default="/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/fusion_dataset", type=str,
-                        help="Parent directory containing the folders with the pickle file.")
-    
-    parser.add_argument('-fp', '--fitzpatrick-path', type=str,
-                        default="/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/fitzpatrick_labels.pkl",
-                        help='Pickle file containing the fitzpatrick labels.')
+def eval_fusion_model(dataset_test, model, device = torch.device('cpu'), method = 'both'):
+    model.eval()
+    print(f"Method : {method}")
+    mae_list = []
+    mae_list_rr = []
+    session_names = []
+    hr_est_arr = []
+    hr_gt_arr = []
+    hr_rgb_arr = []
+    hr_rf_arr = []
+    rr_est_arr = [] #
+    rr_gt_arr = []
+    rr_rgb_arr = []
+    rr_rf_arr = [] #
+    est_wv_arr = []
+    gt_wv_arr = []
+    rgb_wv_arr = []
+    rf_wv_arr = []
+    print(f"Dataset length: {len(dataset_test)}")
 
-    parser.add_argument('--folds-path', type=str,
-                        default="/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/demo_fold.pkl",
-                        help='Pickle file containing the folds.')
-                        
-    parser.add_argument('--fold', type=int, default=0,
-                        help='Fold Number')
 
-    parser.add_argument('--device', type=str, default=None,
-                        help="Device on which the model needs to run (input to torch.device). \
-                              Don't specify for automatic selection. Will be modified inplace.")
+    for i in range(len(dataset_test)):
+        pred_ffts = []
+        targ_ffts = []
+        pred_rgbs = []
+        pred_rfs  = []
 
-    # parser.add_argument('-ckpt','--checkpoint-folder', type=str,
-    #                     default="./ckpt/Fusion",
-    #                     help='Checkpoint Folder.')
+        pred_ffts_rr = []
+        targ_ffts_rr = []
+        pred_rgbs_rr = []
+        pred_rfs_rr  = []
 
-    parser.add_argument('--verbose', action='store_true', help="Verbosity.")
+        train_sig, gt_sig = dataset_test[i]
+        print(f"Sample {i+1}/{len(dataset_test)}")
+        print(f"train_sig keys: {train_sig.keys()}")
+        print(f"train_sig est_ppgs shape: {train_sig['est_ppgs'].shape}")
+        print(f"train_sig rf_ppg shape: {train_sig['rf_ppg'].shape}")
+        print(f"gt_sig shape: {gt_sig.shape}")
+        
+        sess_name = dataset_test.all_combs[i][0]["video_path"]
+        session_names.append(sess_name)
+        
+        train_sig['est_ppgs'] = torch.tensor(train_sig['est_ppgs']).type(torch.float32).to(device)
+        train_sig['est_ppgs'] = torch.unsqueeze(train_sig['est_ppgs'], 0)
+        train_sig['rf_ppg'] = torch.tensor(train_sig['rf_ppg']).type(torch.float32).to(device)
+        train_sig['rf_ppg'] = torch.unsqueeze(train_sig['rf_ppg'], 0)
 
-    parser.add_argument('--epochs', type=int, default=300, help="Number of Epochs.")
+        gt_sig = torch.tensor(gt_sig).type(torch.float32).to(device)
 
-    return parser.parse_args()
-
-def find_best_ckpt(model, dataset, args):
-    best_epoch = 1
-    best_mae = np.inf
-    for epoch in range(1, args.epochs+1):
-        ckpt_path = f'{args.checkpoint_folder}/Gen_{epoch}_epochs.pth'
-        model.load_state_dict(torch.load(ckpt_path))
         with torch.no_grad():
-            maes, _, _, _ = eval_fusion_model(dataset, model, method='both', device=args.device)
-            mean_mae = np.mean(maes)
-            if args.verbose:
-                print(f"Epoch: {epoch}  ;  Mean MAE: {mean_mae}")
-                print(f'{args.checkpoint_folder}/Gen_{epoch}_epochs.pth')
-                print("-"*50)
-            
-            if(mean_mae < best_mae):
-                best_mae = mean_mae
-                best_epoch = epoch
-    return best_epoch
+            if method.lower()  == 'rf':
+                # Only RF, RGB is noise
+                fft_ppg = model(torch.rand(torch.unsqueeze(train_sig['est_ppgs'], axis=0).shape).to(device), torch.unsqueeze(train_sig['rf_ppg'], axis=0))
+            elif method.lower() == 'rgb':
+                # Only RGB, RF is randn
+                fft_ppg = model(torch.unsqueeze(train_sig['est_ppgs'], axis=0), torch.rand(torch.unsqueeze(train_sig['rf_ppg'], axis=0).shape).to(device))
+            else:
+                # Both RGB and RF
+                input_rgb_ppg = torch.unsqueeze(train_sig['est_ppgs'], axis=0)
+                input_rf_ppg = torch.unsqueeze(train_sig['rf_ppg'], axis=0)
+                print(f"Inputs to the fusion model are of shape - RGB FFT: {input_rgb_ppg.shape} and RF FFT: {input_rf_ppg.shape}")
+                fft_ppg = model(torch.unsqueeze(train_sig['est_ppgs'], axis=0), torch.unsqueeze(train_sig['rf_ppg'], axis=0))
 
-def main(args):
-    # Import essential info, i.e. destination folder and fitzpatrick label path
-    pickle_file = f'{args.pickle_file_dir}/fold_{args.fold}.pkl'
-    fitz_labels_path = args.fitzpatrick_path
+        print(f"fft_ppg shape after model inference: {fft_ppg.shape}")
+        
+        # Reduce the dims
+        fft_ppg = torch.squeeze(fft_ppg, 1)
+        temp_fft = fft_ppg[0].detach().cpu().numpy()
+        temp_fft = temp_fft-np.min(temp_fft)
+        temp_fft = temp_fft/np.max(temp_fft) #normalized FFT inference from fusion model
 
-    with open(args.folds_path, "rb") as fp:
-        files_in_fold = pickle.load(fp)
+        # Calculate iffts of original signals
+        rppg_fft = train_sig['rppg_fft']
+        rppg_mag = np.abs(rppg_fft)
+        rppg_ang = np.angle(rppg_fft)
+        # Replace magnitude with new spectrum
+        lix = dataset_test.l_freq_idx 
+        rix = dataset_test.u_freq_idx + 1
+        roi = rppg_mag[lix:rix]
+        temp_fft = temp_fft*np.max(roi)
+        rppg_mag[lix:rix] = temp_fft
+        rppg_mag[-rix+1:-lix+1] = np.flip(temp_fft)
+        rppg_fft_est = rppg_mag*np.exp(1j*rppg_ang)
 
-    train = files_in_fold[args.fold]["train"]
-    val = files_in_fold[args.fold]["val"]
-    test = files_in_fold[args.fold]["test"]
-    
-    # Select the device
-    if args.device is None:
-        args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    else:
-        args.device = torch.device(args.device)
-    if args.verbose:
-        print('Running on device: {}'.format(args.device))
+        rppg_est = np.real(np.fft.ifft(rppg_fft_est)) #PPG reconstruction from FFT from fusion model
+        rppg_est = rppg_est[0:300] # The 300 is the same as desired_ppg_length given in the dataloader
+        gt_est = np.real(np.fft.ifft(train_sig['gt_fft']))[0:300] #The 300 is the same as desired_ppg_length given in the dataloader
 
-    dataset = FusionEvalDatasetObject(datapath=pickle_file, datafiles=train, fft_resolution=48, desired_ppg_len=300, compute_fft=True)
-    dataset_val = FusionEvalDatasetObject(datapath=pickle_file, datafiles=val, fft_resolution=48, desired_ppg_len=300, compute_fft=True)
-    dataset_test = FusionEvalDatasetObject(datapath=pickle_file, datafiles=test, fft_resolution=48, desired_ppg_len=300, compute_fft=True)
+        # Re-normalize
+        rppg_est = (rppg_est - np.mean(rppg_est)) / np.std(rppg_est)
+        gt_est = (gt_est - np.mean(gt_est)) / np.std(gt_est)
 
-    model = FusionModel(base_ppg_est_len=1024, rf_ppg_est_len=1024*5, out_len=1024).to(args.device)
+        # pred_fft_value = pulse_rate_from_power_spectral_density(rppg_est, 30, 45, 150)
+        pred_ffts.append(pulse_rate_from_power_spectral_density(rppg_est, 30, 45, 150)) #fusion model HR prediction
+        # pred_ffts.append(pred_fft_value) #fusion model HR prediction
+        # print(f'1: {pred_ffts}')
+        targ_ffts.append(pulse_rate_from_power_spectral_density(gt_est, 30, 45, 150)) # GT HR
+        pred_rgbs.append(pulse_rate_from_power_spectral_density(train_sig['rgb_true'], 30, 45, 150)) #RGB model HR prediction
+        pred_rfs.append(pulse_rate_from_power_spectral_density(train_sig['rf_true'], 30, 45, 150)) #RF model HR prediction
 
-    # best_epoch = find_best_ckpt(model, dataset_val, args)
-    # print(f"The best epoch was found to be {best_epoch}")
-    # best_ckpt_path = f'{args.checkpoint_folder}/Gen_{best_epoch}_epochs.pth'
-    best_ckpt_path = '/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/best_pth/Fusion/Gen_9_epochs.pth'
-    model.load_state_dict(torch.load(best_ckpt_path, map_location='cpu'))
+        pred_ffts_rr.append(pulse_rate_from_power_spectral_density(rppg_est, 30, 4, 40)) #fusion model RR prediction
+        targ_ffts_rr.append(pulse_rate_from_power_spectral_density(gt_est, 30, 4, 40)) # GT RR
+        pred_rgbs_rr.append(pulse_rate_from_power_spectral_density(train_sig['rgb_true'], 30, 4, 40)) #RGB model RR prediction
+        pred_rfs_rr.append(pulse_rate_from_power_spectral_density(train_sig['rf_true'], 30, 4, 40)) #RF model RR prediction
 
-    mae_list, session_names, hr_test, _ = eval_fusion_model(dataset_test, model, method='both', device=args.device)
-    if args.verbose:
-        print('Mean MAE:', np.mean(np.array(mae_list)))
+        #display GT and prediction values for debugging. (COMMENT OUT if not debugging)
+        print(f"Current length of pred_ffts: {len(pred_ffts)}") 
+        print(f'Index is: {i}')
+        print(f"Predicted HR (Fusion): {pred_ffts[0]} bpm")
+        print(f"Predicted RR (Fusion): {pred_ffts_rr[0]} bpm")
+        print(f"Predicted HR (RGB): {pred_rgbs[0]} bpm")
+        print(f"Predicted RR (RGB): {pred_rgbs_rr[0]} bpm")
+        print(f"Predicted HR (RF): {pred_rfs[0]} bpm") 
+        print(f"Predicted RR (RF): {pred_rfs_rr[0]} bpm") 
+        print(f"Ground Truth HR: {targ_ffts[0]} bpm")
+        print(f"Ground Truth RR: {targ_ffts_rr[0]} bpm")
 
-    eval_clinical_performance(hr_est=np.array(hr_test[0]), hr_gt=np.array(hr_test[1]), \
-        fitz_labels_path=fitz_labels_path, session_names=session_names)
-    print(100*"-")
-    eval_performance_bias(hr_est=np.array(hr_test[0]), hr_gt=np.array(hr_test[1]), \
-        fitz_labels_path=fitz_labels_path, session_names=session_names)
-    print(100*"-")
+        pred_ffts = np.array(pred_ffts)[:,np.newaxis]
+        targ_ffts = np.array(targ_ffts)[:,np.newaxis]
+        pred_rgbs = np.array(pred_rgbs)[:,np.newaxis]
+        pred_rfs = np.array(pred_rfs)[:,np.newaxis]
 
-if __name__ == '__main__':
-    args = parseArgs()
-    main(args)
+        pred_ffts_rr = np.array(pred_ffts_rr)[:,np.newaxis]
+        targ_ffts_rr = np.array(targ_ffts_rr)[:,np.newaxis]
+        pred_rgbs_rr = np.array(pred_rgbs_rr)[:,np.newaxis]
+        pred_rfs_rr = np.array(pred_rfs_rr)[:,np.newaxis]
+
+        #why are we appending [1x1] arrays insted of just [1] value? Not sure.
+        hr_est_arr.append(pred_ffts)
+        hr_gt_arr.append(targ_ffts) 
+        hr_rgb_arr.append(pred_rgbs) # array of RGB model HR predictions
+        hr_rf_arr.append(pred_rfs) # array of RF model HR predictions
+
+        rr_est_arr.append(pred_ffts_rr)
+        rr_gt_arr.append(targ_ffts_rr)
+        rr_rgb_arr.append(pred_rgbs_rr) # array of RGB model HR predictions
+        rr_rf_arr.append(pred_rfs_rr) # array of RF model HR predictions
+
+        _, MAE, _, _ = getErrors(pred_ffts, targ_ffts, PCC=False)
+        _, MAE_rr, _, _ = getErrors(pred_ffts_rr, targ_ffts_rr, PCC=False) #adding this for RR MAE
+        #can get the MAE for RGB and RF models as well.
+
+
+        mae_list.append(MAE)
+        mae_list_rr.append(MAE_rr)
+        est_wv_arr.append(rppg_est) #ppg waveform estimated from fusion model
+        gt_wv_arr.append(gt_est) #ppg waveform reconstructed from gt_fft
+        rgb_wv_arr.append(train_sig['rgb_true']) #
+        rf_wv_arr.append(train_sig['rf_true'])
+
+
+    return np.array(mae_list), np.array(mae_list_rr), session_names, (hr_est_arr, hr_gt_arr), (rr_est_arr, rr_gt_arr), (est_wv_arr,gt_wv_arr, rgb_wv_arr, rf_wv_arr)
+    # mae_list (hr), mae_list (rr), session_names (test), (hr_fusion_pred, hr_gt), (rr_fusion_pred, rr_gt), 
+    # can also make it (hr_est_arr, hr_gt_arr, hr_rgb_arr, hr_rf_arr) to return the values from RGB and RF models as well. (but yep, there are separate files for that)
+    # run this for now and see if the ppg plots look reasonable.
+
+def run_fusion_model(dataset_test, model, device = torch.device('cpu'), method = 'both'):
+    model.eval()
+    print(f"Method : {method}")
+    mae_list = []
+    mae_list_rr = []
+    session_names = []
+    hr_est_arr = []
+    # hr_gt_arr = []
+    hr_rgb_arr = []
+    hr_rf_arr = []
+    rr_est_arr = [] #
+    # rr_gt_arr = []
+    rr_rgb_arr = []
+    rr_rf_arr = [] #
+    est_wv_arr = []
+    # gt_wv_arr = []
+    rgb_wv_arr = []
+    rf_wv_arr = []
+    print(f"Dataset length: {len(dataset_test)}")
+
+
+    for i in range(len(dataset_test)):
+        pred_ffts = []
+        # targ_ffts = []
+        pred_rgbs = []
+        pred_rfs  = []
+
+        pred_ffts_rr = []
+        # targ_ffts_rr = []
+        pred_rgbs_rr = []
+        pred_rfs_rr  = []
+
+        train_sig = dataset_test[i]
+        print(f"Sample {i+1}/{len(dataset_test)}")
+        print(f"train_sig keys: {train_sig.keys()}")
+        print(f"train_sig est_ppgs shape: {train_sig['est_ppgs'].shape}")
+        print(f"train_sig rf_ppg shape: {train_sig['rf_ppg'].shape}")
+        # print(f"gt_sig shape: {gt_sig.shape}")
+        
+        sess_name = dataset_test.all_combs[i][0]["video_path"]
+        session_names.append(sess_name)
+        
+        train_sig['est_ppgs'] = torch.tensor(train_sig['est_ppgs']).type(torch.float32).to(device)
+        train_sig['est_ppgs'] = torch.unsqueeze(train_sig['est_ppgs'], 0)
+        train_sig['rf_ppg'] = torch.tensor(train_sig['rf_ppg']).type(torch.float32).to(device)
+        train_sig['rf_ppg'] = torch.unsqueeze(train_sig['rf_ppg'], 0)
+
+        with torch.no_grad():
+            if method.lower()  == 'rf':
+                # Only RF, RGB is noise
+                fft_ppg = model(torch.rand(torch.unsqueeze(train_sig['est_ppgs'], axis=0).shape).to(device), torch.unsqueeze(train_sig['rf_ppg'], axis=0))
+            elif method.lower() == 'rgb':
+                # Only RGB, RF is randn
+                fft_ppg = model(torch.unsqueeze(train_sig['est_ppgs'], axis=0), torch.rand(torch.unsqueeze(train_sig['rf_ppg'], axis=0).shape).to(device))
+            else:
+                # Both RGB and RF
+                input_rgb_ppg = torch.unsqueeze(train_sig['est_ppgs'], axis=0)
+                input_rf_ppg = torch.unsqueeze(train_sig['rf_ppg'], axis=0)
+                print(f"Inputs to the fusion model are of shape - RGB FFT: {input_rgb_ppg.shape} and RF FFT: {input_rf_ppg.shape}")
+                fft_ppg = model(torch.unsqueeze(train_sig['est_ppgs'], axis=0), torch.unsqueeze(train_sig['rf_ppg'], axis=0))
+
+        print(f"fft_ppg shape after model inference: {fft_ppg.shape}")
+        
+        # Reduce the dims
+        fft_ppg = torch.squeeze(fft_ppg, 1)
+        temp_fft = fft_ppg[0].detach().cpu().numpy()
+        temp_fft = temp_fft-np.min(temp_fft)
+        temp_fft = temp_fft/np.max(temp_fft)
+
+        # Calculate iffts of original signals
+        rppg_fft = train_sig['rppg_fft']
+        rppg_mag = np.abs(rppg_fft)
+        rppg_ang = np.angle(rppg_fft)
+        # Replace magnitude with new spectrum
+        lix = dataset_test.l_freq_idx 
+        rix = dataset_test.u_freq_idx + 1
+        roi = rppg_mag[lix:rix]
+        temp_fft = temp_fft*np.max(roi)
+        rppg_mag[lix:rix] = temp_fft
+        rppg_mag[-rix+1:-lix+1] = np.flip(temp_fft)
+        rppg_fft_est = rppg_mag*np.exp(1j*rppg_ang)
+
+        rppg_est = np.real(np.fft.ifft(rppg_fft_est))
+        rppg_est = rppg_est[0:300] # The 300 is the same as desired_ppg_length given in the dataloader
+        # gt_est = np.real(np.fft.ifft(train_sig['gt_fft']))[0:300] #The 300 is the same as desired_ppg_length given in the dataloader
+
+        # Re-normalize
+        rppg_est = (rppg_est - np.mean(rppg_est)) / np.std(rppg_est)
+        # gt_est = (gt_est - np.mean(gt_est)) / np.std(gt_est)
+
+        # pred_fft_value = pulse_rate_from_power_spectral_density(rppg_est, 30, 45, 150)
+        pred_ffts.append(pulse_rate_from_power_spectral_density(rppg_est, 30, 45, 150)) #fusion model HR prediction
+        # pred_ffts.append(pred_fft_value) #fusion model HR prediction
+        # print(f'1: {pred_ffts}')
+        # targ_ffts.append(pulse_rate_from_power_spectral_density(gt_est, 30, 45, 150)) # GT HR
+        pred_rgbs.append(pulse_rate_from_power_spectral_density(train_sig['rgb_true'], 30, 45, 150)) #RGB model HR prediction
+        pred_rfs.append(pulse_rate_from_power_spectral_density(train_sig['rf_true'], 30, 45, 150)) #RF model HR prediction
+
+        pred_ffts_rr.append(pulse_rate_from_power_spectral_density(rppg_est, 30, 4, 40)) #fusion model RR prediction
+        # targ_ffts_rr.append(pulse_rate_from_power_spectral_density(gt_est, 30, 4, 40)) # GT RR
+        pred_rgbs_rr.append(pulse_rate_from_power_spectral_density(train_sig['rgb_true'], 30, 4, 40)) #RGB model RR prediction
+        pred_rfs_rr.append(pulse_rate_from_power_spectral_density(train_sig['rf_true'], 30, 4, 40)) #RF model RR prediction
+
+        #display GT and prediction values for debugging. (COMMENT OUT if not debugging)
+        print(f"Current length of pred_ffts: {len(pred_ffts)}") 
+        print(f'Index is: {i}')
+        print(f"Predicted HR (Fusion): {pred_ffts[0]} bpm")
+        print(f"Predicted RR (Fusion): {pred_ffts_rr[0]} bpm")
+        print(f"Predicted HR (RGB): {pred_rgbs[0]} bpm")
+        print(f"Predicted RR (RGB): {pred_rgbs_rr[0]} bpm")
+        print(f"Predicted HR (RF): {pred_rfs[0]} bpm") 
+        print(f"Predicted RR (RF): {pred_rfs_rr[0]} bpm") 
+        # print(f"Ground Truth HR: {targ_ffts[0]} bpm")
+        # print(f"Ground Truth RR: {targ_ffts_rr[0]} bpm")
+
+        pred_ffts = np.array(pred_ffts)[:,np.newaxis]
+        # targ_ffts = np.array(targ_ffts)[:,np.newaxis]
+        pred_rgbs = np.array(pred_rgbs)[:,np.newaxis]
+        pred_rfs = np.array(pred_rfs)[:,np.newaxis]
+
+        pred_ffts_rr = np.array(pred_ffts_rr)[:,np.newaxis]
+        # targ_ffts_rr = np.array(targ_ffts_rr)[:,np.newaxis]
+        pred_rgbs_rr = np.array(pred_rgbs_rr)[:,np.newaxis]
+        pred_rfs_rr = np.array(pred_rfs_rr)[:,np.newaxis]
+
+        #why are we appending [1x1] arrays insted of just [1] value? Not sure.
+        hr_est_arr.append(pred_ffts)
+        # hr_gt_arr.append(targ_ffts) 
+        hr_rgb_arr.append(pred_rgbs) # array of RGB model HR predictions
+        hr_rf_arr.append(pred_rfs) # array of RF model HR predictions
+
+        rr_est_arr.append(pred_ffts_rr)
+        # rr_gt_arr.append(targ_ffts_rr)
+        rr_rgb_arr.append(pred_rgbs_rr) # array of RGB model HR predictions
+        rr_rf_arr.append(pred_rfs_rr) # array of RF model HR predictions
+
+        # _, MAE, _, _ = getErrors(pred_ffts, targ_ffts, PCC=False)
+        # _, MAE_rr, _, _ = getErrors(pred_ffts_rr, targ_ffts_rr, PCC=False) #adding this for RR MAE
+        #can get the MAE for RGB and RF models as well.
+
+
+        # mae_list.append(MAE)
+        # mae_list_rr.append(MAE_rr)
+        est_wv_arr.append(rppg_est) #ppg waveform estimated from fusion model
+        # gt_wv_arr.append(gt_est) #ppg waveform reconstructed from gt_fft
+        rgb_wv_arr.append(train_sig['rgb_true']) #
+        rf_wv_arr.append(train_sig['rf_true'])
+
+
+    return 1, 1, session_names, (hr_est_arr, [1]), (rr_est_arr, [1]), (est_wv_arr,[1], rgb_wv_arr, rf_wv_arr)
+    # mae_list (hr), mae_list (rr), session_names (test), (hr_fusion_pred, hr_gt), (rr_fusion_pred, rr_gt), 
+    # can also make it (hr_est_arr, hr_gt_arr, hr_rgb_arr, hr_rf_arr) to return the values from RGB and RF models as well. (but yep, there are separate files for that)
+    # run this for now and see if the ppg plots look reasonable.
