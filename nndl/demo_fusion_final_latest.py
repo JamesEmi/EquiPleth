@@ -5,11 +5,12 @@ import torch
 import argparse
 import imageio
 from tqdm import tqdm
+import cv2
 
 from fusion.model import FusionModel
 from rgb.model import CNN3D
 from rf.model import RF_conv_decoder
-from utils.eval_fusion_je import eval_fusion_model
+from utils.eval_fusion_je import eval_fusion_model, run_fusion_model
 from utils.utils_je import pulse_rate_from_power_spectral_density, extract_video
 from data.datasets_je import FusionEvalDatasetObject, FusionRunDatasetObject
 from rf import organizer as org
@@ -19,9 +20,9 @@ import datetime
 
 def parseArgs():
     parser = argparse.ArgumentParser(description='Script to generate PPGs and test one sample using the fusion model')
-    parser.add_argument('-rgb-dir', '--rgb-dir', default="/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rgb_files",
-                        type=str, help="Directory containing RGB frames.")
-    parser.add_argument('-rf-file', '--rf-dir', default="/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rf_files", 
+    parser.add_argument('-rgb-dir', '--rgb-dir', default="/Users/jamesemilian/triage/equipleth/experiment_data/rgb_files",
+                        type=str, help="Directory containing RGB frames.") # /Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rgb_files
+    parser.add_argument('-rf-file', '--rf-dir', default="/Users/jamesemilian/triage/equipleth/experiment_data/rf_files", 
                         type=str, help="Path to rf.pkl file.") #/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rf_files
     parser.add_argument('--device', type=str, default=None, help="Device to run the model on.")
     parser.add_argument('--sample-idx', type=int, default=0, help="Index of the sample to test.")
@@ -54,6 +55,71 @@ def gen_rgb_preds(root_dir, session_name, model, sequence_length=64, max_ppg_len
         circ_buff = frames[0:100]
         frames = np.concatenate((frames, circ_buff))
 
+
+        for cur_frame_num in range(frames.shape[0]):
+                    # Preprocess
+                    cur_frame = frames[cur_frame_num, :, :, :]
+                    cur_frame_cropped = torch.from_numpy(cur_frame.astype(np.uint8)).permute(2, 0, 1).float()
+                    cur_frame_cropped = cur_frame_cropped / 255
+                    # Add the T dim
+                    cur_frame_cropped = cur_frame_cropped.unsqueeze(0).to(device) 
+
+                    # Concat
+                    if cur_frame_num % sequence_length == 0:
+                        cur_cat_frames = cur_frame_cropped
+                    else:
+                        cur_cat_frames = torch.cat((cur_cat_frames, cur_frame_cropped), 0)
+
+                    # Test the performance
+                    if cur_cat_frames.shape[0] == sequence_length:
+                        
+                        # DL
+                        with torch.no_grad():
+                            # Add the B dim
+                            cur_cat_frames = cur_cat_frames.unsqueeze(0) 
+                            cur_cat_frames = torch.transpose(cur_cat_frames, 1, 2)
+                            # Get the estimated PPG signal
+                            cur_est_ppg, _, _, _ = model(cur_cat_frames)
+                            cur_est_ppg = cur_est_ppg.squeeze().cpu().numpy()
+
+                        # First sequence
+                        if cur_est_ppgs is None: 
+                            cur_est_ppgs = cur_est_ppg
+                        else:
+                            cur_est_ppgs = np.concatenate((cur_est_ppgs, cur_est_ppg), -1)
+
+        cur_video_sample['video_path'] = os.path.basename(cur_video_sample['video_path'])                    
+        cur_video_sample['est_ppg'] = cur_est_ppgs[0:max_ppg_length]
+
+    return video_samples
+
+def gen_rgb_preds_chiron(root_dir, session_name, model, sequence_length=64, max_ppg_length = 900, file_name = "rgbd_rgb", device=torch.device('cpu')):
+    model.eval()
+    video_samples = []
+
+    for cur_session in session_name:
+        single_video_sample = {"video_path" : os.path.join(root_dir, cur_session)}
+        video_samples.append(single_video_sample)
+
+    for cur_video_sample in tqdm(video_samples):
+        cur_video_path = cur_video_sample["video_path"]
+        cur_est_ppgs = None
+        # frames = extract_video(path=cur_video_path, file_str=file_name)
+        # circ_buff = frames[0:100]
+        # frames = np.concatenate((frames, circ_buff))
+
+        # Extract and sort all image files in the directory
+        frame_files = sorted([os.path.join(cur_video_path, f) for f in os.listdir(cur_video_path) if f.endswith('.jpg')])
+        # Load the frames
+        frames = []
+        for frame_file in frame_files:
+            frame = cv2.imread(frame_file)
+            frames.append(frame)
+        frames = np.array(frames)
+
+        # Circular buffer to wrap around the video
+        circ_buff = frames[0:100]
+        frames = np.concatenate((frames, circ_buff))
 
         for cur_frame_num in range(frames.shape[0]):
                     # Preprocess
@@ -169,18 +235,18 @@ def gen_rf_preds(root_path, demo_files, model, sequence_length = 128, max_ppg_le
     return video_samples
 
 def gen_rf_preds_chiron(root_path, demo_files, model, sequence_length = 128, max_ppg_length = 900, 
-                  adc_samples = 512, rf_window_size = 5, freq_slope=60.012e12, 
-                  samp_f=218000, sampling_ratio = 4, num_chirps=16, device=torch.device('cpu')):
+                  adc_samples = 512, rf_window_size = 5, freq_slope=1.92e12, 
+                  samp_f=218000, sampling_ratio = 1, num_chirps=1, device=torch.device('cpu')):
     model.eval()
     video_samples = []
     for rf_folder in tqdm(demo_files, total=len(demo_files)):
         try:
-            rf_fptr = open(os.path.join(root_path, rf_folder, "rf.pkl"),'rb')
+            rf_fptr = open(os.path.join(root_path, rf_folder, "radar_data.pkl"),'rb') #inference case
             s = pickle.load(rf_fptr)
             
             # radar_data = np.array(s) #conversion to np array before passing to org is not necessary
             # Number of samples is set ot 256 for our experiments
-            rf_organizer = org.Organizer(s, num_chirps, 1, 1, adc_samples)
+            rf_organizer = org.Organizer_Chiron(s, num_chirps, 1, 1, adc_samples)
             #have to check equipleth vs chiron data deeper to see if there is interleaving (bring back 2*adc_samples??) 
             frames = rf_organizer.organize()
 
@@ -191,10 +257,11 @@ def gen_rf_preds_chiron(root_path, demo_files, model, sequence_length = 128, max
             range_index = find_range(data_f, samp_f, freq_slope, adc_samples)
             temp_window = np.blackman(rf_window_size)
             raw_data = data_f[:, range_index-len(temp_window)//2:range_index+len(temp_window)//2 + 1]
-            circ_buffer = raw_data[0:800]
+            # circ_buffer = raw_data[0:800]
             
             # Concatenate extra to generate ppgs of size 3600
-            raw_data = np.concatenate((raw_data, circ_buffer))
+            # raw_data = np.concatenate((raw_data, circ_buffer))
+            raw_data = np.tile(raw_data, (5, 1)) #IMPORTANT - doing a 5x concat here to get to desired shape. Change based on param change (esp chirp num)
             raw_data = np.array([np.real(raw_data),  np.imag(raw_data)])
             raw_data = np.transpose(raw_data, axes=(0,2,1))
             rf_data = raw_data
@@ -251,7 +318,11 @@ def save_fusion_data_to_pickle(rgb_frames_dir, session_name, est_ppgs, rf_ppg, p
     """Save the generated PPG data and RF PPGs into a pickle file."""
 
     gt_ppg_path = os.path.join(rgb_frames_dir, session_name, 'rgbd_ppg.npy')
-    gt_ppg = np.load(gt_ppg_path)
+    try:
+        gt_ppg = np.load(gt_ppg_path)
+    except FileNotFoundError:
+        print(f"Ground truth PPG file not found at {gt_ppg_path}. Using an empty array.")
+        gt_ppg = np.array([])  # Return an empty array if the file does not exist
 
     print(f"Shape of est_ppg here is {est_ppgs.shape}")
     print(f"Shape of rf_ppg here is {rf_ppg.shape}")
@@ -269,7 +340,6 @@ def save_fusion_data_to_pickle(rgb_frames_dir, session_name, est_ppgs, rf_ppg, p
     with open(pickle_path, 'wb') as f:
         pickle.dump([fusion_data], f)
     
-
     print(f"Fusion data saved to {pickle_path}")
     
 
@@ -280,21 +350,21 @@ def main(args):
     else:
         args.device = torch.device(args.device)
 
-    rf_demo = ['91_1']
-    session_name_demo = ['v_91_1']
+    rf_demo = ['1_1']
+    session_name_demo = ['v_1_1'] #v_91_1 in EP case
 
     # Load the RF model (RF_conv_decoder) for generating PPG from RF data
     rf_model = RF_conv_decoder().to(args.device)
     rf_ckpt_path = '/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/best_pth/RF_IQ_Net/best.pth'  # Update this path
     rf_model.load_state_dict(torch.load(rf_ckpt_path, map_location=args.device))
-    rf_demo_data =  gen_rf_preds(root_path=args.rf_dir, demo_files=rf_demo, model=rf_model, device=args.device)
-    # rf_demo_data =  gen_rf_preds_chiron(root_path=args.rf_dir, demo_files=rf_demo, model=rf_model, device=args.device)
+    # rf_demo_data =  gen_rf_preds(root_path=args.rf_dir, demo_files=rf_demo, model=rf_model, device=args.device)
+    rf_demo_data =  gen_rf_preds_chiron(root_path=args.rf_dir, demo_files=rf_demo, model=rf_model, device=args.device)
 
     # Load the model for generating PPG from RGB frames
     rgb_model = CNN3D().to(args.device)
     rgb_ckpt_path = '/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/best_pth/RGB_CNN3D/best.pth'  # Update this path
     rgb_model.load_state_dict(torch.load(rgb_ckpt_path, map_location=args.device))
-    rgb_demo_data = gen_rgb_preds(root_dir=args.rgb_dir, session_name=session_name_demo, model=rgb_model, device=args.device)
+    rgb_demo_data = gen_rgb_preds_chiron(root_dir=args.rgb_dir, session_name=session_name_demo, model=rgb_model, device=args.device)
     
     print(len(rf_demo_data))
     print(len(rgb_demo_data))
@@ -316,12 +386,15 @@ def main(args):
     # Save the generated data into a pickle file
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     pickle_file_path = f'/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/fusion_dataset/gen_fusion_data_{timestamp}.pkl'
-    session_name = 'v_91_1' #put this in args
+    session_name = 'v_1_1' #put this in args
     save_fusion_data_to_pickle(args.rgb_dir, session_name, est_ppgs, rf_ppg, pickle_file_path)
 
-    session_name_demo = "/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rgb_files/v_1_1"
+    # session_name_demo = "/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/rgb_files/v_1_1"
+    session_name_demo = "/Users/jamesemilian/triage/equipleth/experiment_data/rgb_files/v_1_1"
     # Load the saved pickle file and create a dataset for evaluation
-    dataset_test = FusionRunDatasetObject(
+
+    #UNCOMMENT for EVAL RUN
+    dataset_test = FusionEvalDatasetObject(
         datapath=pickle_file_path,
         datafiles=session_name_demo,
         fft_resolution=48,
@@ -329,28 +402,33 @@ def main(args):
         compute_fft=True
     )
 
-    #what happens if I do this??
-    # dataset_test = FusionEvalDatasetObject(
+    # dataset_test = FusionRunDatasetObject(
     #     datapath=pickle_file_path,
     #     datafiles=session_name_demo,
     #     fft_resolution=48,
     #     desired_ppg_len=300,
     #     compute_fft=True
     # )
+
+
     #same Dataset length: 0 error. Solve it.
     fusion_model = FusionModel(base_ppg_est_len=1024, rf_ppg_est_len=1024*5, out_len=1024).to(args.device)
     # Run forward pass using the fusion model
-    _, _, session_name, hr_test, rr_test, waveforms = eval_fusion_model(dataset_test, fusion_model, method='both', device=args.device)
-
+    _, _, session_name, hr_test, rr_test, waveforms = eval_fusion_model(dataset_test, fusion_model, method='both', device=args.device) #uncomment for eval run (with gt file)
+    # _, _, session_name, hr_test, rr_test, waveforms = run_fusion_model(dataset_test, fusion_model, method='both', device=args.device) #uncomment for inf run (with only rgb and rf files)
+    
     # Visualize results
-    est_wv_arr, gt_wv_arr, rgb_wv_arr, rf_wv_arr = waveforms
-    plot_and_analyze_results(est_wv_arr[0], gt_wv_arr[0], rgb_wv_arr[0], rf_wv_arr[0])
+    # est_wv_arr, gt_wv_arr, rgb_wv_arr, rf_wv_arr = waveforms #uncomment for eval run (with gt file)
+    # plot_and_analyze_results(est_wv_arr[0], rgb_wv_arr[0], rf_wv_arr[0], ppg_gt=gt_wv_arr[0])  #uncomment for eval run (with gt file)
+    est_wv_arr, _, rgb_wv_arr, rf_wv_arr = waveforms #uncomment for inf run (with only rgb and rf files)
+    plot_and_analyze_results(est_wv_arr[0], rgb_wv_arr[0], rf_wv_arr[0])  #uncomment for inf run (with only rgb and rf files)
 
-def plot_and_analyze_results(ppg_fusion, ppg_gt, ppg_rgb, ppg_rf, fs=30):
+def plot_and_analyze_results(ppg_fusion, ppg_rgb, ppg_rf, ppg_gt=None, fs=30):
     plt.figure(figsize=(10, 8))
     plt.subplot(2, 1, 1)
     plt.plot(ppg_fusion, label='Fusion Model PPG')
-    plt.plot(ppg_gt, label='GT PPG')
+    if ppg_gt is not None:
+        plt.plot(ppg_gt, label='GT PPG')
     plt.plot(ppg_rgb, label='RGB Model PPG')
     plt.plot(ppg_rf, label='RF Model PPG')
     plt.title('PPG Predictions')
@@ -359,7 +437,8 @@ def plot_and_analyze_results(ppg_fusion, ppg_gt, ppg_rgb, ppg_rf, fs=30):
     _, fft_fusion_F, fft_fusion_Pxx = pulse_rate_from_power_spectral_density(ppg_fusion, 30, 45, 150)
     _, fft_rgb_F, fft_rgb_Pxx = pulse_rate_from_power_spectral_density(ppg_rgb, 30, 45, 150)
     _, fft_rf_F, fft_rf_Pxx = pulse_rate_from_power_spectral_density(ppg_rf, 30, 45, 150)
-    _, fft_gt_F, fft_gt_Pxx = pulse_rate_from_power_spectral_density(ppg_gt, 30, 45, 150)
+    if ppg_gt is not None:
+        _, fft_gt_F, fft_gt_Pxx = pulse_rate_from_power_spectral_density(ppg_gt, 30, 45, 150)
     # fft_fusion = np.fft.fft(ppg_fusion) #naive fft with no filtering
     # fft_rgb = np.fft.fft(ppg_rgb)
     # fft_rf = np.fft.fft(ppg_rf) 
@@ -367,7 +446,8 @@ def plot_and_analyze_results(ppg_fusion, ppg_gt, ppg_rgb, ppg_rf, fs=30):
 
     plt.subplot(2, 1, 2)
     plt.plot(fft_fusion_F, fft_fusion_Pxx, label='Fusion FFT')
-    plt.plot(fft_gt_F, fft_gt_Pxx, label='GT FFT')
+    if ppg_gt is not None:
+        plt.plot(fft_gt_F, fft_gt_Pxx, label='GT FFT')
     plt.plot(fft_rgb_F, fft_rgb_Pxx, label='RGB FFT')
     plt.plot(fft_rf_F, fft_rf_Pxx, label='RF FFT')
     plt.title('FFT Outputs')
