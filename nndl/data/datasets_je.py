@@ -93,8 +93,9 @@ class FusionEvalDatasetObject(Dataset):
         if self.compute_fft:
             n_curr = len(item_sig) * self.fft_resolution
             fft_gt  = np.abs(np.fft.fft(item_sig, n=int(n_curr), axis=0))
-            fft_gt = fft_gt / np.max(fft_gt, axis=0)
+            fft_gt = fft_gt / np.max(fft_gt, axis=0) 
             
+            n_curr = len(item['est_ppgs']) * self.fft_resolution  #if item sig is missing because no GT npy; can use this nw.
             fft_est = np.abs(np.fft.fft(item['est_ppgs'], n=int(n_curr), axis=0))
             fft_est = fft_est / np.max(fft_est, axis=0)
             fft_est = fft_est[self.l_freq_idx : self.u_freq_idx + 1]
@@ -170,7 +171,7 @@ class FusionRunDatasetObject(Dataset):
             # if data_pt['video_path'] in self.datafiles:
             if len(data_pt) != 4:
                 # self.usable_data.remove(data_pt)
-                print(f"{data_pt['video_path']} is dropped")
+                # print(f"{data_pt['video_path']} is dropped")
                 print(f"Data does not have all 4 keys, check your pkl file/loading")
                 continue
             
@@ -186,7 +187,7 @@ class FusionRunDatasetObject(Dataset):
             self.num_static_samples = num_static_samples
             for data_pt in self.usable_data:
                 # TODO crosscheck this and pass as a param
-                print(f'data_pt here is: {data_pt}')
+                # print(f'data_pt here is: {data_pt}')
                 # static_idxs = np.array([0,128,256,384,512]) #this is hardcoded to lead to 5 combs
                 static_idxs = np.array([0])
 
@@ -197,7 +198,7 @@ class FusionRunDatasetObject(Dataset):
         else:
             for data_pt in self.usable_data:
                 self.all_combs.append((data_pt, None))
-                seq_len = len(data_pt['gt_ppgs'])*self.fft_resolution
+                seq_len = len(data_pt['est_ppgs'])*self.fft_resolution
         print(f"Dataset Ready. There are {self.__len__()} samples")
 
         freqs_bpm = np.fft.fftfreq(seq_len, d=1/self.fs) * 60
@@ -217,22 +218,23 @@ class FusionRunDatasetObject(Dataset):
         # dict_keys(['video_path', 'est_ppgs', 'gt_ppgs', 'rf_ppg'])
         # Get the ppg data of the rgb, gt and rf
         item = {'est_ppgs':dict_item['est_ppgs'], 'rf_ppg':dict_item['rf_ppg']}
-        item_sig = dict_item['gt_ppgs']
+        # item_sig = dict_item['gt_ppgs']
         if self.desired_ppg_len is not None:
             assert start_idx is not None
-            item_sig = item_sig[start_idx+self.ppg_offset:start_idx+self.ppg_offset+self.desired_ppg_len]
+            # item_sig = item_sig[start_idx+self.ppg_offset:start_idx+self.ppg_offset+self.desired_ppg_len]
             item['est_ppgs'] = item['est_ppgs'][start_idx:start_idx+self.desired_ppg_len]
             item['rf_ppg'] = item['rf_ppg'][start_idx:start_idx+self.desired_ppg_len]
         
-        item_sig = (item_sig - np.mean(item_sig)) / np.std(item_sig)
+        # item_sig = (item_sig - np.mean(item_sig)) / np.std(item_sig)
         item['est_ppgs'] = (item['est_ppgs'] - np.mean(item['est_ppgs'])) / np.std(item['est_ppgs'])
         item['rf_ppg'] = (item['rf_ppg'] - np.mean(item['rf_ppg'], axis = 0)) / np.std(item['rf_ppg'], axis = 0)
 
         if self.compute_fft:
-            n_curr = len(item_sig) * self.fft_resolution
-            fft_gt  = np.abs(np.fft.fft(item_sig, n=int(n_curr), axis=0)) #does this make sense??
-            fft_gt = fft_gt / np.max(fft_gt, axis=0)
+            # n_curr = len(item_sig) * self.fft_resolution
+            # fft_gt  = np.abs(np.fft.fft(item_sig, n=int(n_curr), axis=0)) #does this make sense??
+            # fft_gt = fft_gt / np.max(fft_gt, axis=0)
             
+            n_curr = len(item['est_ppgs']) * self.fft_resolution #['est_ppgs'] Shpuld be the same shape as len(item_sig) asak (900,)
             fft_est = np.abs(np.fft.fft(item['est_ppgs'], n=int(n_curr), axis=0))
             fft_est = fft_est / np.max(fft_est, axis=0)
             fft_est = fft_est[self.l_freq_idx : self.u_freq_idx + 1]
@@ -243,7 +245,7 @@ class FusionRunDatasetObject(Dataset):
             #Get full ffts
             rppg_fft = np.fft.fft(item['est_ppgs'], n=int(n_curr), axis=0)
             rf_fft = np.fft.fft(item['rf_ppg'], n=int(n_curr), axis=0)
-            gt_fft = np.fft.fft(item_sig, n=int(n_curr), axis=0)
+            # gt_fft = np.fft.fft(item_sig, n=int(n_curr), axis=0)
 
             if(self.window_rf):
                 center_idx = np.argmax(fft_est)
@@ -259,10 +261,10 @@ class FusionRunDatasetObject(Dataset):
             else:
                 fft_rf = fft_rf / np.max(fft_rf, axis=0)
             
-            return {'est_ppgs':fft_est, 'rf_ppg':fft_rf, 'rppg_fft':rppg_fft, 'rf_fft':rf_fft, 'gt_fft':gt_fft, 'rgb_true': item['est_ppgs'], 'rf_true': item['rf_ppg'], 'start_idx': start_idx}, fft_gt[self.l_freq_idx : self.u_freq_idx + 1]
+            return {'est_ppgs':fft_est, 'rf_ppg':fft_rf, 'rppg_fft':rppg_fft, 'rf_fft':rf_fft, 'rgb_true': item['est_ppgs'], 'rf_true': item['rf_ppg'], 'start_idx': start_idx}
         # If compute_fft is True; FFTs are returned, along with the original PPG waveforms too.
         else:
-            item_sig         = self.lowPassFilter(item_sig)
+            # item_sig         = self.lowPassFilter(item_sig)
             item['est_ppgs'] = self.lowPassFilter(item['est_ppgs'])
             for i in range(item['rf_ppg'].shape[1]):
                 item['rf_ppg'][:,i]   = self.lowPassFilter(item['rf_ppg'][:,i])
@@ -271,9 +273,4 @@ class FusionRunDatasetObject(Dataset):
             item['est_ppgs'] = (item['est_ppgs'] - np.mean(item['est_ppgs'])) / np.std(item['est_ppgs'])
             item['rf_ppg'] = (item['rf_ppg'] - np.mean(item['rf_ppg'], axis = 0)) / np.std(item['rf_ppg'], axis = 0)
 
-            return item, np.array(item_sig)
-
-    def lowPassFilter(self, BVP, butter_order=4):
-        [b, a] = sig.butter(butter_order, [self.l_freq_bpm/60, self.u_freq_bpm/60], btype='bandpass', fs = self.fs)
-        filtered_BVP = sig.filtfilt(b, a, np.double(BVP))
-        return filtered_BVP
+            return item
