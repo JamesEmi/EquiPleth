@@ -215,30 +215,32 @@ class Organizer:
 		# 	ret_frames[i] = self.iq(frames[i])
 
 		# return ret_frames
-
-
-
+	
 class Organizer_Chiron:
 
-	def __init__(self, all_data, num_chirp_loops, num_rx, num_tx, num_samples, verbose=False):
-		self.data = all_data[0]
-		self.packet_num = all_data[1] #using frame_counter as a proxy
+	def __init__(self, all_data, num_chirp_loops, num_rx, num_tx, num_samples, verbose=False, nsecs=30):
+		self.nsecs = nsecs
+		self.slice_size = int(len(all_data[1])/60 * self.nsecs) #when input data is worth 60s of data
+		self.data = all_data[0][:self.slice_size]
+		self.packet_num = all_data[1][:self.slice_size] #using frame_counter as a proxy
+		# self.data = all_data[0]
+		# self.packet_num = all_data[1] #using frame_counter as a proxy
 		# self.byte_count = all_data[2]
-		byte_count_step = 150 
-		self.byte_count = np.arange(257608624, 257608624 + len(all_data[1]) * byte_count_step, byte_count_step) #simulated array based on data from 91_1 pkl file in EP data
+		byte_count_step = 1500 
+		self.byte_count = np.arange(257608624, 257608624 + len(self.packet_num) * byte_count_step, byte_count_step) #simulated array based on data from 91_1 pkl file in EP data
 
 		self.num_packets = len(self.byte_count) #easily can be frame count also.
 		self.num_chirps = num_chirp_loops*num_tx
 		self.num_rx = num_rx
-		self.num_samples = num_samples
+		self.num_samples = num_samples #what is this value supposed to be in Chiron case?
 
 		self.BYTES_IN_FRAME = self.num_chirps * self.num_rx * self.num_samples * 2 * 2
 		self.BYTES_IN_FRAME_CLIPPED = (self.BYTES_IN_FRAME // BYTES_IN_PACKET) * BYTES_IN_PACKET
 		self.UINT16_IN_FRAME = self.BYTES_IN_FRAME // 2
 		self.NUM_PACKETS_PER_FRAME = self.BYTES_IN_FRAME // BYTES_IN_PACKET
 
-		self.start_time = all_data[3]
-		self.end_time = all_data[4]
+		# self.start_time = all_data[3]
+		# self.end_time = all_data[4]
 		self.verbose = verbose
 
 	def iq(self, raw_frame):
@@ -326,8 +328,8 @@ class Organizer_Chiron:
 
 	def organize(self):
 
-		radar_unix_start_time = dt.timestamp(dt.fromisoformat(self.start_time[:-1]))*1e6
-		radar_unix_end_time = dt.timestamp(dt.fromisoformat(self.end_time[:-1]))*1e6
+		# radar_unix_start_time = dt.timestamp(dt.fromisoformat(self.start_time[:-1]))*1e6
+		# radar_unix_end_time = dt.timestamp(dt.fromisoformat(self.end_time[:-1]))*1e6
 
 		if self.verbose: print('Start time: ', self.start_time)
 		if self.verbose: print('End time: ', self.end_time)
@@ -486,13 +488,13 @@ class Organizer_Chiron:
 			if self.verbose:
 				print('Packets in order')
 			start_chunk = 0
-			ret_frames = self.get_frames_ch(start_chunk, -1, bc, adc_samples)
+			ret_frames = self.get_frames(start_chunk, -1, bc, adc_samples)
 
 		elif len(packets_ooo) == 1:
 			if self.verbose:
 				print('1 packet not in order')
 			start_chunk = packets_ooo[0] + 1
-			ret_frames = self.get_frames_ch(start_chunk, -1, bc, adc_samples)
+			ret_frames = self.get_frames(start_chunk, -1, bc, adc_samples)
 
 		else:
 			if self.verbose:
@@ -523,7 +525,7 @@ class Organizer_Chiron:
 				start_chunk = start_new_packets_ooo[i] + 1
 				end_chunk = end_new_packets_ooo[i]
 
-				curr_frames = self.get_frames_ch(start_chunk, end_chunk, bc, adc_samples)
+				curr_frames = self.get_frames(start_chunk, end_chunk, bc, adc_samples)
 
 				if i == 0:
 					ret_frames = curr_frames
