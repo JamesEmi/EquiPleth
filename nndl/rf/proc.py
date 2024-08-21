@@ -17,6 +17,21 @@ def create_fast_slow_matrix(data: np.array) -> np.array:
     data_f = np.fft.fft(data_, axis = 1)
     return data_f
 
+def create_fast_slow_matrix_multichirp(data: np.array) -> np.array:
+    """ Create the range slow-time matrix (Radar data matrix).
+
+    Args:
+        data (np.array): The organized data from the RF sensors.
+
+    Returns:
+        np.array: The range slow-time matrix.
+    """
+    # Taking only 1 TX and RX (as per the dataset).
+    data_ = data[:,0,0,:] #picking just first axis
+    # DC Compensation.
+    data_f = np.fft.fft(data_, axis = 1)
+    return data_f
+
 def find_range(data_f: np.array, samp_f: float, freq_slope: float, samples: int, 
                max_range_allowed: float = 1, min_idx: int = 5) -> int:
     """ Find the max range from the Radar data matrix.
