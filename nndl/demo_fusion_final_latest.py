@@ -393,16 +393,8 @@ def main(args):
     session_name_demo = "/Users/jamesemilian/triage/equipleth/experiment_data/rgb_files/v_1_1"
     # Load the saved pickle file and create a dataset for evaluation
 
-    #UNCOMMENT for EVAL RUN
-    dataset_test = FusionEvalDatasetObject(
-        datapath=pickle_file_path,
-        datafiles=session_name_demo,
-        fft_resolution=48,
-        desired_ppg_len=300,
-        compute_fft=True
-    )
-
-    # dataset_test = FusionRunDatasetObject(
+    # #UNCOMMENT for EVAL RUN
+    # dataset_test = FusionEvalDatasetObject(
     #     datapath=pickle_file_path,
     #     datafiles=session_name_demo,
     #     fft_resolution=48,
@@ -410,12 +402,24 @@ def main(args):
     #     compute_fft=True
     # )
 
+    dataset_test = FusionRunDatasetObject(
+        datapath=pickle_file_path,
+        datafiles=session_name_demo,
+        fft_resolution=48,
+        desired_ppg_len=300,
+        compute_fft=True
+    )
+
 
     #same Dataset length: 0 error. Solve it.
     fusion_model = FusionModel(base_ppg_est_len=1024, rf_ppg_est_len=1024*5, out_len=1024).to(args.device)
+    # best_ckpt_path = f'{args.checkpoint_folder}/Gen_{best_epoch}_epochs.pth'
+    fusiongen_ckpt_path = '/Users/jamesemilian/triage/equipleth/Camera_77GHzRadar_Plethysmography_2/best_pth/Fusion/Gen_9_epochs.pth' #TODO - Haven't yet run single inference using this; test it.
+    fusion_model.load_state_dict(torch.load(fusiongen_ckpt_path, map_location=args.device))
+
     # Run forward pass using the fusion model
-    _, _, session_name, hr_test, rr_test, waveforms = eval_fusion_model(dataset_test, fusion_model, method='both', device=args.device) #uncomment for eval run (with gt file)
-    # _, _, session_name, hr_test, rr_test, waveforms = run_fusion_model(dataset_test, fusion_model, method='both', device=args.device) #uncomment for inf run (with only rgb and rf files)
+    # _, _, session_name, hr_test, rr_test, waveforms = eval_fusion_model(dataset_test, fusion_model, method='both', device=args.device) #uncomment for eval run (with gt file)
+    _, _, session_name, hr_test, rr_test, waveforms = run_fusion_model(dataset_test, fusion_model, method='both', device=args.device) #uncomment for inf run (with only rgb and rf files)
     
     # Visualize results
     # est_wv_arr, gt_wv_arr, rgb_wv_arr, rf_wv_arr = waveforms #uncomment for eval run (with gt file)
